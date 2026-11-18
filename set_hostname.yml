@@ -8,4 +8,4 @@
       cisco.ios.ios_hostname:
         config:
           hostname: router-awx
-      state: merged
+        state: merged
