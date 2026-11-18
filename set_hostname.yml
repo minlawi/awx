@@ -1,0 +1,11 @@
+---
+- name: Configure Router Hostname
+  hosts: routers
+  gather_facts: false
+
+  tasks:
+    - name: Set router hostname
+      cisco.ios.ios_hostname:
+        config:
+          hostname: "{{ target_hostname | default('AWX-Router-Test') }}"
+        state: merged
