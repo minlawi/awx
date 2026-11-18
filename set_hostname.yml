@@ -3,6 +3,25 @@
   hosts: routers
   gather_facts: false
 
+  pre_tasks:
+    - name: Ensure .ssh directory exists in container HOME
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'HOME') }}/.ssh"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+
+    - name: Write legacy SSH KEX and HostKey config for libssh
+      ansible.builtin.copy:
+        dest: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        mode: '0600'
+        content: |
+          Host *
+              KexAlgorithms +diffie-hellman-group14-sha1
+              HostKeyAlgorithms +ssh-rsa
+              PubkeyAcceptedAlgorithms +ssh-rsa
+      delegate_to: localhost
+
   tasks:
     - name: Merged the hostname configuration on the router
       cisco.ios.ios_hostname:
