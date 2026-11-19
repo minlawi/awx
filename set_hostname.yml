@@ -28,7 +28,7 @@
     - name: Merged the hostname configuration on the router
       cisco.ios.ios_hostname:
         config:
-          hostname: router-awx
+          hostname: awx-webhook
         state: merged
 
     - name: Create Loopback1 interface
