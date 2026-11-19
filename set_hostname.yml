@@ -10,6 +10,7 @@
         state: directory
         mode: '0700'
       delegate_to: localhost
+      become: false
 
     - name: Write legacy SSH KEX and HostKey config for libssh
       ansible.builtin.copy:
@@ -21,6 +22,7 @@
               HostKeyAlgorithms +ssh-rsa
               PubkeyAcceptedAlgorithms +ssh-rsa
       delegate_to: localhost
+      become: false
 
   tasks:
     - name: Merged the hostname configuration on the router
