@@ -28,5 +28,5 @@
     - name: Set router hostname
       cisco.ios.ios_hostname:
         config:
-          hostname: router-awx-cicd-workflow
+          hostname: router-awx-self-hosted
         state: merged
