@@ -18,9 +18,17 @@ jobs:
           # Future playbooks: just add 2 lines (playbook + template_id)
 
     steps:
-      - name: Launch AWX Job Template ${{ matrix.template_id }} if ${{ matrix.playbook }} changed
-        if: contains(github.event.head_commit.modified, matrix.playbook) || contains(github.event.head_commit.added, matrix.playbook)
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check and launch ${{ matrix.playbook }} (Template ${{ matrix.template_id }})
         run: |
-          curl -fsS -X POST "${{ secrets.AWX_BASE_NGROK_URL }}/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
-            -H "Authorization: Bearer ${{ secrets.AWX_API_TOKEN }}" \
-            -H "Content-Type: application/json"
+          if git diff --name-only HEAD~1 HEAD | grep -qx "${{ matrix.playbook }}"; then
+            echo "Change detected in ${{ matrix.playbook }} — launching AWX template ${{ matrix.template_id }}..."
+            curl -fsS -X POST "${{ secrets.AWX_BASE_NGROK_URL }}/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
+              -H "Authorization: Bearer ${{ secrets.AWX_API_TOKEN }}" \
+              -H "Content-Type: application/json"
+          else
+            echo "No changes in ${{ matrix.playbook }} — skipping."
+          fi
