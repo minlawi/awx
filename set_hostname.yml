@@ -28,5 +28,5 @@
     - name: Set router hostname
       cisco.ios.ios_hostname:
         config:
-          hostname: router-awx
+          hostname: router-awx-webhook
         state: merged
