@@ -38,5 +38,5 @@
         config:
           - name: Loopback0
             ipv4:
-              - address: 10.255.255.1/32
+              - address: 1.1.1.1/32
         state: merged
