@@ -1,0 +1,26 @@
+name: Trigger AWX on Modified Playbook
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - playbook: set_hostname.yml
+            template_id: 12
+          - playbook: create_loopback.yml
+            template_id: 13
+          # Future playbooks: just add 2 lines (playbook + template_id)
+
+    steps:
+      - name: Launch AWX Job Template ${{ matrix.template_id }} if ${{ matrix.playbook }} changed
+        if: contains(github.event.head_commit.modified, matrix.playbook) || contains(github.event.head_commit.added, matrix.playbook)
+        run: |
+          curl -fsS -X POST "${{ secrets.AWX_BASE_NGROK_URL }}/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
+            -H "Authorization: Bearer ${{ secrets.AWX_API_TOKEN }}" \
+            -H "Content-Type: application/json"
