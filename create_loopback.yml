@@ -1,0 +1,42 @@
+---
+- name: Create and Configure Loopback Interface on Cisco IOS
+  hosts: all
+  gather_facts: false
+
+  pre_tasks:
+    - name: Ensure ~/.ssh directory exists in AWX Execution Environment
+      ansible.builtin.file:
+        path: "~/.ssh"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
+      ansible.builtin.copy:
+        dest: "~/.ssh/config"
+        mode: "0600"
+        content: |
+          Host *
+            KexAlgorithms +diffie-hellman-group14-sha1
+            HostKeyAlgorithms +ssh-rsa
+            PubkeyAcceptedKeyTypes +ssh-rsa
+      delegate_to: localhost
+      become: false
+
+  tasks:
+    - name: Configure Loopback0 description and status
+      cisco.ios.ios_interfaces:
+        config:
+          - name: Loopback0
+            description: Configured via Ansible AWX
+            enabled: true
+        state: merged
+
+    - name: Configure Loopback0 IPv4 address
+      cisco.ios.ios_l3_interfaces:
+        config:
+          - name: Loopback0
+            ipv4:
+              - address: 10.255.255.1/32
+        state: merged
