@@ -1,0 +1,7 @@
+loopback_interfaces:
+  - name: Loopback0
+    description: Management-Loopback
+    ipv4: 10.255.10.2/32
+  - name: Loopback1
+    description: BGP-Peering-Loopback
+    ipv4: 10.255.20.2/32
