@@ -9,9 +9,11 @@
 router_hostname: JR1-CORE-SG
 
 loopback_interfaces:
-  - name: lo0.0
+  - name: lo0
+    unit: 0
     description: Management-Loopback
     ipv4: 10.255.10.3/32
-  - name: lo0.0
+  - name: lo0
+    unit: 1
     description: BGP-Peering-Loopback
     ipv4: 10.255.20.3/32

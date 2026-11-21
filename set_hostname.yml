@@ -47,8 +47,3 @@
           hostname: "{{ router_hostname }}"
         state: merged
       when: ansible_network_os == 'junipernetworks.junos.junos'
-
-    - name: Save configuration on Juniper JUNOS devices
-      junipernetworks.junos.junos_config:
-        save_when: modified
-      when: ansible_network_os == 'junipernetworks.junos.junos'
