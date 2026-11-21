@@ -1,7 +1,7 @@
 loopback_interfaces:
   - name: Loopback0
-    description: Management-Loopback
+    description: Configured-Ansible
     ipv4: 10.255.10.3/32
   - name: Loopback1
-    description: BGP-Peering-Loopback
+    description: Configured-Ansible
     ipv4: 10.255.20.3/32
