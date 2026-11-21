@@ -1,4 +1,5 @@
 ---
 collections:
   - name: cisco.ios
-  - name: junipernetworks.junos
+  - name: juniper.device
+  - name: ansible.netcommon

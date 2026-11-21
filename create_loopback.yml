@@ -3,30 +3,30 @@
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
 
-  pre_tasks:
-    - name: Ensure ~/.ssh directory exists in AWX Execution Environment
-      ansible.builtin.file:
-        path: "~/.ssh"
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      changed_when: false
+  # pre_tasks:
+  #   - name: Ensure ~/.ssh directory exists in AWX Execution Environment
+  #     ansible.builtin.file:
+  #       path: "~/.ssh"
+  #       state: directory
+  #       mode: "0700"
+  #     delegate_to: localhost
+  #     become: false
+  #     run_once: true
+  #     changed_when: false
 
-    - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
-      ansible.builtin.copy:
-        dest: "~/.ssh/config"
-        mode: "0600"
-        content: |
-          Host *
-            KexAlgorithms +diffie-hellman-group14-sha1
-            HostKeyAlgorithms +ssh-rsa
-            PubkeyAcceptedKeyTypes +ssh-rsa
-      delegate_to: localhost
-      become: false
-      run_once: true
-      changed_when: false
+  #   - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
+  #     ansible.builtin.copy:
+  #       dest: "~/.ssh/config"
+  #       mode: "0600"
+  #       content: |
+  #         Host *
+  #           KexAlgorithms +diffie-hellman-group14-sha1
+  #           HostKeyAlgorithms +ssh-rsa
+  #           PubkeyAcceptedKeyTypes +ssh-rsa
+  #     delegate_to: localhost
+  #     become: false
+  #     run_once: true
+  #     changed_when: false
 
   tasks:
   # --- CISCO IOS TASKS ---
@@ -57,17 +57,17 @@
       
   # --- JUNIPER JUNOS TASKS ---
     - name: Configure Juniper JUNOS Loopback description and status
-      junipernetworks.junos.junos_interfaces:
+      juniper.device.junos_interfaces:
         config:
           - name: "{{ item.name }}"
             description: "{{ item.description }}"
             enabled: true
         state: merged
       loop: "{{ loopback_interfaces }}"
-      when: ansible_network_os == 'junipernetworks.junos.junos'
+      when: ansible_network_os == 'juniper.device.junos'
 
     - name: Configure Juniper JUNOS Loopback IPv4 address
-      junipernetworks.junos.junos_l3_interfaces:
+      juniper.device.junos_l3_interfaces:
         config:
           - name: "{{ item.name }}"
             unit: "{{ item.unit }}"
@@ -75,4 +75,4 @@
               - address: "{{ item.ipv4 }}"
         state: merged
       loop: "{{ loopback_interfaces }}"
-      when: ansible_network_os == 'junipernetworks.junos.junos'
+      when: ansible_network_os == 'juniper.device.junos'
