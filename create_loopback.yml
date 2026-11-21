@@ -3,30 +3,30 @@
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
 
-  pre_tasks:
-    - name: Ensure ~/.ssh directory exists in AWX Execution Environment
-      ansible.builtin.file:
-        path: "~/.ssh"
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      changed_when: false
+  # pre_tasks:
+  #   - name: Ensure ~/.ssh directory exists in AWX Execution Environment
+  #     ansible.builtin.file:
+  #       path: "~/.ssh"
+  #       state: directory
+  #       mode: "0700"
+  #     delegate_to: localhost
+  #     become: false
+  #     run_once: true
+  #     changed_when: false
 
-    - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
-      ansible.builtin.copy:
-        dest: "~/.ssh/config"
-        mode: "0600"
-        content: |
-          Host *
-            KexAlgorithms +diffie-hellman-group14-sha1
-            HostKeyAlgorithms +ssh-rsa
-            PubkeyAcceptedKeyTypes +ssh-rsa
-      delegate_to: localhost
-      become: false
-      run_once: true
-      changed_when: false
+  #   - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
+  #     ansible.builtin.copy:
+  #       dest: "~/.ssh/config"
+  #       mode: "0600"
+  #       content: |
+  #         Host *
+  #           KexAlgorithms +diffie-hellman-group14-sha1
+  #           HostKeyAlgorithms +ssh-rsa
+  #           PubkeyAcceptedKeyTypes +ssh-rsa
+  #     delegate_to: localhost
+  #     become: false
+  #     run_once: true
+  #     changed_when: false
 
   tasks:
   # --- CISCO IOS TASKS ---
