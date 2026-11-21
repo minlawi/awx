@@ -27,6 +27,7 @@
       run_once: true
 
   tasks:
+  # --- CISCO IOS TASKS ---
     - name: Configure Cisco IOS Loopback description and status
       cisco.ios.ios_interfaces:
         config:
@@ -46,3 +47,34 @@
         state: merged
       loop: "{{ loopback_interfaces }}"
       when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Save configuration on Cisco IOS devices
+      cisco.ios.ios_config:
+        save_when: modified
+      when: ansible_network_os == 'cisco.ios.ios'
+      
+  # --- JUNIPER JUNOS TASKS ---
+    - name: Configure Juniper JUNOS Loopback description and status
+      junipernetworks.junos.junos_interfaces:
+        config:
+          - name: "{{ item.name }}"
+            description: "{{ item.description }}"
+            enabled: true
+        state: merged
+      loop: "{{ loopback_interfaces }}"
+      when: ansible_network_os == 'junipernetworks.junos.junos'
+
+    - name: Configure Juniper JUNOS Loopback IPv4 address
+      junipernetworks.junos.junos_l3_interfaces:
+        config:
+          - name: "{{ item.name }}"
+            ipv4:
+              - address: "{{ item.ipv4 }}"
+        state: merged
+      loop: "{{ loopback_interfaces }}"
+      when: ansible_network_os == 'junipernetworks.junos.junos'
+
+    - name: Save configuration on Juniper JUNOS devices
+      junipernetworks.junos.junos_config:
+        save_when: modified
+      when: ansible_network_os == 'junipernetworks.junos.junos'

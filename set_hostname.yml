@@ -27,9 +27,28 @@
       run_once: true
 
   tasks:
+  # --- CISCO IOS TASKS ---
     - name: Set hostname on Cisco IOS devices
       cisco.ios.ios_hostname:
         config:
           hostname: "{{ router_hostname }}"
         state: merged
       when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Save configuration on Cisco IOS devices
+      cisco.ios.ios_config:
+        save_when: modified
+      when: ansible_network_os == 'cisco.ios.ios'
+
+  # --- JUNIPER JUNOS TASKS ---
+    - name: Set hostname on Juniper JUNOS devices
+      junipernetworks.junos.junos_hostname:
+        config:
+          hostname: "{{ router_hostname }}"
+        state: merged
+      when: ansible_network_os == 'junipernetworks.junos.junos'
+
+    - name: Save configuration on Juniper JUNOS devices
+      junipernetworks.junos.junos_config:
+        save_when: modified
+      when: ansible_network_os == 'junipernetworks.junos.junos'

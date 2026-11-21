@@ -1,0 +1,4 @@
+---
+# Shared connection settings for all devices in [juniper_junos]
+ansible_connection: ansible.netcommon.netconf
+ansible_network_os: junipernetworks.junos.junos
