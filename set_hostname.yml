@@ -1,6 +1,6 @@
 ---
-- name: Configure Cisco IOS Router Hostname
-  hosts: all
+- name: Configure Dynamic Device Hostname
+  hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
 
   pre_tasks:
@@ -11,6 +11,7 @@
         mode: "0700"
       delegate_to: localhost
       become: false
+      run_once: true
 
     - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
       ansible.builtin.copy:
@@ -23,10 +24,12 @@
             PubkeyAcceptedKeyTypes +ssh-rsa
       delegate_to: localhost
       become: false
+      run_once: true
 
   tasks:
-    - name: Set router hostname
+    - name: Set hostname on Cisco IOS devices
       cisco.ios.ios_hostname:
         config:
-          hostname: router-awx-self-hosted
+          hostname: "{{ router_hostname }}"
         state: merged
+      when: ansible_network_os == 'cisco.ios.ios'
