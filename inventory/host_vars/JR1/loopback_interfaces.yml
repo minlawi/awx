@@ -1,5 +1,5 @@
 loopback_interfaces:
   - name: lo0
-    description: Configured-Ansible
+    description: Router-ID
     ipv4: 10.255.10.3/32
     unit: 0
