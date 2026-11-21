@@ -1,4 +1,4 @@
-name: Trigger AWX on Modified Playbook or Inventory
+name: Trigger AWX Selectively
 
 on:
   push:
@@ -13,8 +13,10 @@ jobs:
       matrix:
         include:
           - playbook: set_hostname.yml
+            var_file: hostname.yml
             template_id: 12
           - playbook: create_loopback.yml
+            var_file: loopback_interfaces.yml
             template_id: 13
 
     steps:
@@ -23,20 +25,18 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Check git diff and trigger AWX Job Template
+      - name: Check changes and launch AWX
         env:
           AWX_URL: ${{ secrets.AWX_BASE_URL }}
           AWX_TOKEN: ${{ secrets.AWX_API_TOKEN }}
         run: |
           CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
-          echo "Changed files in latest commit:"
-          echo "$CHANGED_FILES"
 
-          if echo "$CHANGED_FILES" | grep -qE "^(${{ matrix.playbook }}|inventory/)"; then
-            echo "Change detected — launching Template ID ${{ matrix.template_id }}..."
+          if echo "$CHANGED_FILES" | grep -qE "(^${{ matrix.playbook }}$|/${{ matrix.var_file }}$)"; then
+            echo "Launching Template ID ${{ matrix.template_id }}..."
             curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
               -H "Authorization: Bearer $AWX_TOKEN" \
               -H "Content-Type: application/json"
           else
-            echo "No relevant changes for ${{ matrix.playbook }} — skipping."
+            echo "Skipping ${{ matrix.playbook }} — no changes."
           fi
