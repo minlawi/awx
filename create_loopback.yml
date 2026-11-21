@@ -1,6 +1,6 @@
 ---
-- name: Create and Configure Loopback Interface on Cisco IOS
-  hosts: all
+- name: Create and Configure Loopback Interface on Network Devices
+  hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
 
   pre_tasks:
@@ -11,6 +11,7 @@
         mode: "0700"
       delegate_to: localhost
       become: false
+      run_once: true
 
     - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
       ansible.builtin.copy:
@@ -23,20 +24,25 @@
             PubkeyAcceptedKeyTypes +ssh-rsa
       delegate_to: localhost
       become: false
+      run_once: true
 
   tasks:
-    - name: Configure Loopback0 description and status
+    - name: Configure Cisco IOS Loopback description and status
       cisco.ios.ios_interfaces:
         config:
-          - name: Loopback0
-            description: Configured via Ansible AWX
+          - name: "{{ item.name }}"
+            description: "{{ item.description }}"
             enabled: true
         state: merged
+      loop: "{{ loopback_interfaces }}"
+      when: ansible_network_os == 'cisco.ios.ios'
 
-    - name: Configure Loopback0 IPv4 address
+    - name: Configure Cisco IOS Loopback IPv4 address
       cisco.ios.ios_l3_interfaces:
         config:
-          - name: Loopback0
+          - name: "{{ item.name }}"
             ipv4:
-              - address: 1.1.1.1/32
+              - address: "{{ item.ipv4 }}"
         state: merged
+      loop: "{{ loopback_interfaces }}"
+      when: ansible_network_os == 'cisco.ios.ios'
