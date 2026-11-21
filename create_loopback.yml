@@ -12,6 +12,7 @@
       delegate_to: localhost
       become: false
       run_once: true
+      changed_when: false
 
     - name: Configure legacy SSH algorithms for Cisco IOS 15.7 compatibility
       ansible.builtin.copy:
@@ -25,6 +26,7 @@
       delegate_to: localhost
       become: false
       run_once: true
+      changed_when: false
 
   tasks:
   # --- CISCO IOS TASKS ---

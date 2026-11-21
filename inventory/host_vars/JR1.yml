@@ -13,7 +13,3 @@ loopback_interfaces:
     unit: 0
     description: Management-Loopback
     ipv4: 10.255.10.3/32
-  - name: lo1
-    unit: 0
-    description: BGP-Peering-Loopback
-    ipv4: 10.255.20.3/32
