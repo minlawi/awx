@@ -1,5 +1,5 @@
 loopback_interfaces:
   - name: lo0
     description: Router-ID
-    ipv4: 10.255.10.3/32
+    ipv4: 10.255.10.33/32
     unit: 0
