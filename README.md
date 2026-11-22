@@ -13,6 +13,9 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 | **Network Lab & Devices** | EVE-NG & Target Routers | **EVE-NG** hosting virtual **Cisco IOS** (management via **SSH**) and **Juniper Junos** (management via **NETCONF**) routers with L3 reachability to AWX |
 | **Authentication (AAA)** | TACACS+ Server | **TARANAC** (formerly known as **tacacsgui**) deployed and reachable by all target network devices for centralized AAA authentication |
 
+## Architecture Topology
+![Multi-Vendor Network Automation Topology](./ERROR/architecture.png)
+
 ## Project Notes
 [![View Notes on Excalidraw](https://img.shields.io/badge/Project_Notes-Excalidraw-6965DB?style=for-the-badge&logo=excalidraw&logoColor=white)](https://app.excalidraw.com/s/1GkvF5YK7dJ/8NU2mcP2T52)
 
