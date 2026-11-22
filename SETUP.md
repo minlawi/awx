@@ -204,6 +204,9 @@ In this phase, we push a simple `set_hostname.yml` playbook to GitHub, create th
 In your local Git repository, create a simple `set_hostname.yml` playbook targeting the `cisco_routers` group and push it to `main`:
 
 ```bash
+mkdir -p playbooks && cd playbooks
+```
+```bash
 cat << 'EOF' > set_hostname.yml
 ---
 - name: Configure Cisco IOS Hostname
@@ -218,7 +221,7 @@ cat << 'EOF' > set_hostname.yml
         state: merged
 EOF
 
-git add set_hostname.yml
+git add playbooks/set_hostname.yml
 git commit -m "feat: add initial Cisco IOS set_hostname playbook"
 git push origin main
 ```
@@ -275,7 +278,7 @@ The AWX group name **must match** the `hosts:` pattern defined in `set_hostname.
    * **Inventory:** `EVE-NG Lab Inventory`
    * **Project:** `Network-Automation-SOT` *(because `Update Revision on Launch` is enabled, AWX automatically pulls `set_hostname.yml` from GitHub)*
    * **Execution Environment:** `Default execution environment` *(intentionally selected first to reproduce the legacy SSH error)*
-   * **Playbook:** `set_hostname.yml`
+   * **Playbook:** `playbooks/set_hostname.yml`
    * **Credentials:** Select `Cisco Local Credentials`
 3. Click **Save**, then click **Launch** to run the job manually.
 
@@ -561,7 +564,7 @@ In this phase, we move from manual job execution to event-driven automation. Bec
 Make a quick change to `set_hostname.yml` (such as updating the target hostname) and push it to `main`:
 
 ```bash
-git add set_hostname.yml
+git add playbooks/set_hostname.yml
 git commit -m "test: trigger AWX Job Template via GitHub Webhook and ngrok"
 git push origin main
 ```
@@ -650,7 +653,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - playbook: set_hostname.yml
+          - playbook: playbooks/set_hostname.yml
             template_id: 12 # Get this ID from Step 7.2.2
           # Future playbooks: just add 2 lines (playbook + template_id)
 
@@ -690,7 +693,7 @@ git push origin main
    * Update the hostname inside `set_hostname.yml` and push to `main`:
 
      ```bash
-     git add set_hostname.yml
+     git add playbooks/set_hostname.yml
      git commit -m "test: trigger AWX over LAN via self-hosted GitHub Actions runner"
      git push origin main
      ```
@@ -754,6 +757,10 @@ EOF
 Update `set_hostname.yml` and `create_loopback.yml` so they pull values dynamically from `host_vars` rather than hardcoding them:
 
 ```bash
+mkdir -p playbooks && cd playbooks
+```
+
+```bash
 cat << 'EOF' > set_hostname.yml
 ---
 - name: Configure Cisco IOS Hostname from Source of Truth
@@ -767,7 +774,8 @@ cat << 'EOF' > set_hostname.yml
           hostname: "{{ router_hostname }}"
         state: merged
 EOF
-
+```
+```bash
 cat << 'EOF' > create_loopback.yml
 ---
 - name: Configure Cisco IOS Loopback Interfaces from Source of Truth
@@ -843,10 +851,10 @@ jobs:
       # Map each playbook and its corresponding host_vars filename to an AWX Job Template ID
       matrix:
         include:
-          - playbook: set_hostname.yml
+          - playbook: playbooks/set_hostname.yml
             var_file: hostname.yml
             template_id: 12 # Replace with your actual template_id
-          - playbook: create_loopback.yml
+          - playbook: playbooks/create_loopback.yml
             var_file: loopback_interfaces.yml
             template_id: 13 # Replace with your actual template_id
 
@@ -880,7 +888,7 @@ EOF
 
 Commit and push all changes:
 ```bash
-git add inventory/ set_hostname.yml create_loopback.yml .github/workflows/trigger-awx.yml
+git add inventory/ playbooks/set_hostname.yml playbooks/create_loopback.yml .github/workflows/trigger-awx.yml
 git commit -m "feat: migrate to modular Git-backed SOT with variable-aware AWX triggers"
 git push origin main
 ```
@@ -1111,7 +1119,7 @@ EOF
 Commit and push the Juniper Source of Truth and playbook updates (no changes are needed in `.github/workflows/trigger-awx.yml` because it already matches `*/hostname.yml` and `*/loopback_interfaces.yml`):
 
 ```bash
-git add inventory/ set_hostname.yml create_loopback.yml
+git add inventory/ playbooks/set_hostname.yml playbooks/create_loopback.yml
 git commit -m "feat: add Juniper Junos support via juniper.device and multi-vendor custom EE"
 git push origin main
 ```
