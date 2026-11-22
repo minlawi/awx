@@ -193,3 +193,100 @@ ssh -i ~/.ssh/awx_github_key -T git@github.com
 3. Click **Save**.
 
 **Verification:** AWX immediately starts a Project Sync job. Confirm the **Status** changes to **Successful** (green) under **Views** → **Jobs**.
+
+> [← Back to Project Overview](./README.md)
+
+## 3. Run Playbook Manually Using Target Device Local Credentials
+
+In this phase, we push a simple `set_hostname.yml` playbook to GitHub, create the matching inventory group and local credentials in AWX, and run the Job Template manually using AWX's **Default Execution Environment** to reproduce the legacy Cisco IOS SSH algorithm error before applying our custom EE fix.
+
+### 3.1 Push `set_hostname.yml` to Your GitHub Repository
+In your local Git repository, create a simple `set_hostname.yml` playbook targeting the `cisco_routers` group and push it to `main`:
+
+```bash
+cat << 'EOF' > set_hostname.yml
+---
+- name: Configure Cisco IOS Hostname
+  hosts: cisco_routers
+  gather_facts: false
+
+  tasks:
+    - name: Merged the hostname configuration on the router
+      cisco.ios.ios_hostname:
+        config:
+          hostname: R1-AUTOMATED
+        state: merged
+EOF
+
+git add set_hostname.yml
+git commit -m "feat: add initial Cisco IOS set_hostname playbook"
+git push origin main
+```
+
+*Verification:* Confirm `set_hostname.yml` appears in your GitHub repository under the `main` branch.
+
+---
+
+### 3.2 Create a Machine Credential in AWX
+1. Log in to the **AWX Web UI** (`http://<your-server-ip>:32000`).
+2. Navigate to **Resources** → **Credentials** → **Add**.
+3. Enter the local router login details:
+   * **Name:** `Cisco Local Credentials`
+   * **Credential Type:** `Machine`
+   * **Username:** `<router-local-username>` *(e.g., `admin`)*
+   * **Password:** `<router-local-password>`
+   * **Privilege Escalation Method:** `enable` *(if the local user does not land directly in privilege level 15)*
+   * **Privilege Escalation Password:** `<router-enable-password>` *(if required)*
+4. Click **Save**.
+
+*Verification:* Confirm `Cisco Local Credentials` appears in the **Credentials** list with type `Machine`.
+
+---
+
+### 3.3 Create an Inventory, Group, and Host in AWX
+The AWX group name **must match** the `hosts:` pattern defined in `set_hostname.yml` (`cisco_routers`); otherwise, AWX will skip the host with a pattern mismatch warning.
+
+1. Go to **Resources** → **Inventories** → **Add** → **Add inventory**.
+2. Set **Name** to `EVE-NG Lab Inventory` and click **Save**.
+3. **Create the Matching Group:**
+   * Open the **Groups** tab inside `EVE-NG Lab Inventory` and click **Add**.
+   * Set **Name** to `cisco_routers` *(matches `hosts: cisco_routers` in `set_hostname.yml`)* and click **Save**.
+4. **Add the Host Inside the `cisco_routers` Group:**
+   * Click on `cisco_routers` → open its **Hosts** tab → click **Add** → **Add new host**.
+   * **Name:** `R1`
+   * **Variables (YAML):**
+     ```yaml
+     ansible_network_os: cisco.ios.ios
+     ansible_connection: ansible.netcommon.network_cli
+     ansible_become: yes
+     ansible_become_method: enable
+     ```
+   * Click **Save**.
+
+*Verification:* Open `EVE-NG Lab Inventory` → **Groups** → `cisco_routers` → **Hosts** and confirm `R1` is listed and toggled **On**.
+
+---
+
+### 3.4 Create and Launch the Job Template (Using Default EE)
+1. Go to **Resources** → **Templates** → **Add** → **Add job template**.
+2. Configure the template using the built-in **Default Execution Environment**:
+   * **Name:** `Test - Set Hostname (Local Auth)`
+   * **Job Type:** `Run`
+   * **Inventory:** `EVE-NG Lab Inventory`
+   * **Project:** `Network-Automation-SOT` *(because `Update Revision on Launch` is enabled, AWX automatically pulls `set_hostname.yml` from GitHub)*
+   * **Execution Environment:** `Default execution environment` *(intentionally selected first to reproduce the legacy SSH error)*
+   * **Playbook:** `set_hostname.yml`
+   * **Credentials:** Select `Cisco Local Credentials`
+3. Click **Save**, then click **Launch** to run the job manually.
+
+---
+
+### 3.5 Expected Failure & Resolution
+When running against an older Cisco IOS image in EVE-NG using the **Default Execution Environment**, AWX syncs the project cleanly, matches `R1` under `cisco_routers`, and fails during the SSH handshake:
+
+### Error Output
+![Cisco IOS SSH KEX Error](./ERROR/ansible-pyblissh.png)
+
+> **How to Fix This Issue:** Follow **[1. Legacy Cisco IOS SSH Key Exchange Failure (`no acceptable kex algorithm`)](./TROUBLESHOOTING.md#1-legacy-cisco-ios-ssh-key-exchange-failure-no-acceptable-kex-algorithm)** in `TROUBLESHOOTING.md` to bake a custom Cisco Execution Environment (`localhost/awx-ee-cisco:latest`), assign it to this Job Template, and re-run the job.
+
+*Verification:* Once the custom Execution Environment is assigned and the Job Template is re-launched, the job finishes with status **Successful** (green) and `show running-config | include hostname` on the router confirms `hostname R1-AUTOMATED`.
