@@ -134,7 +134,7 @@ kubectl get secret awx-demo-admin-password -n awx -o jsonpath="{.data.password}"
 
 > [← Back to Project Overview](./README.md)
 
-## 2. GitHub SSH Authentication & AWX Project Sync
+## 2. GitHub SSH Authentication & AWX Project Auto-Sync
 
 ### 2.1 Generate an SSH Key Pair on the AWX Server
 Generate a dedicated `ed25519` SSH key pair without a passphrase so AWX can pull from GitHub automatically:
