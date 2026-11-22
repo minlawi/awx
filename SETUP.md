@@ -450,3 +450,47 @@ ssh tacacs_admin@192.168.50.186
 3. Open the **TARANAC Web UI** → **AAA Logs** (Authentication & Session/Accounting logs) and confirm a successful login entry for `tacacs_admin` from `192.168.50.186`.
 
 > [← Back to Project Overview](./README.md)
+
+## 5. Verify AWX Job Template Authentication via TACACS+
+
+Now that direct SSH login against TARANAC is working, we replace the local router credentials in AWX with the centralized TACACS+ account and confirm that AWX Job Templates authenticate, authorize, and log commands through TARANAC.
+
+### 5.1 Create a TACACS+ Machine Credential in AWX
+1. Log in to the **AWX Web UI** (`http://<your-server-ip>:32000`).
+2. Navigate to **Resources** → **Credentials** → **Add**.
+3. Configure the TACACS+ credential:
+   * **Name:** `Cisco TACACS+ Credentials`
+   * **Credential Type:** `Machine`
+   * **Username:** `tacacs_admin` *(the user created in TARANAC during Step 4.1)*
+   * **Password:** `<tacacs-user-password>`
+   * *(Optional)* **Privilege Escalation Method:** `enable` and **Privilege Escalation Password:** `<tacacs-user-password>` *(only needed if your TARANAC profile does not land directly in privilege level 15)*
+4. Click **Save**.
+
+*Verification:* Confirm `Cisco TACACS+ Credentials` appears in **Resources** → **Credentials** with type `Machine`.
+
+---
+
+### 5.2 Update the Job Template to Use TACACS+ Credentials
+1. Go to **Resources** → **Templates** and open your existing Cisco Job Template (`Test - Set Hostname (Local Auth)`), then click **Edit**.
+   *(Optional: Rename the template to `Set Hostname (TACACS+ Auth)` to reflect the new authentication method.)*
+2. Under **Credentials**, click the **×** next to `Cisco Local Credentials` to remove it, then select `Cisco TACACS+ Credentials`.
+3. Confirm **Execution Environment** is still set to `Custom Cisco EE` (`localhost/awx-ee-cisco:latest`).
+4. Click **Save**.
+
+*Verification:* Open the template's **Details** tab and confirm only `Cisco TACACS+ Credentials` is attached.
+
+---
+
+### 5.3 Launch the Job Template and Verify End-to-End
+1. Click **Launch** on the Job Template to run `set_hostname.yml` against `R1`.
+2. Watch the job output under **Views** → **Jobs**.
+
+*Verification:*
+1. **AWX Job Output:** The job completes with status **Successful** (green) and zero authentication or SSH algorithm errors.
+2. **TARANAC AAA Logs:** Open the **TARANAC Web UI** (`https://<TARANAC_SERVER_IP>`) → **LOGGING & REPORTS** → **AAA Logs**:
+   * **Authentication Logs:** Confirm a **PASS** entry for `tacacs_admin` authenticating on `R1` (`192.168.50.186`) from the AWX VM's IP address.
+   * **Accounting / Command Logs:** Confirm the configuration commands pushed by Ansible (`configure terminal`, `hostname ...`) are logged under `tacacs_admin`, proving AWX authenticated via TACACS+ rather than falling back to local credentials.
+
+---
+
+> [← Back to Project Overview](./README.md)
