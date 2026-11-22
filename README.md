@@ -16,7 +16,7 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 ## Project Milestones & Progress
 
 1. [Installed AWX (open-source Ansible Tower) on K3s](./SETUP.md#1-install-ansible-awx-on-k3s) – **Completed**
-2. [Set up SSH key-based authentication between AWX and the private GitHub repository with project auto-sync on job launch](./SETUP.md#2-github-ssh-authentication--awx-project-sync) – **Completed**
+2. [Set up SSH key-based authentication between AWX and the private GitHub repository with project auto-sync on job launch](./SETUP.md#2-github-ssh-authentication--awx-project-auto-sync) – **Completed**
 3. [Ran a playbook in Ansible AWX using target device local username and password authentication](./SETUP.md#3-target-device-credentials-local--tacacs) – **Completed**
 4. [Verified direct SSH login authentication against the TARANAC (TACACS+) server without AWX](./SETUP.md#3-target-device-credentials-local--tacacs) – **Completed**
 5. [Verified AWX Job Template authentication against the target Cisco router via the TACACS+ server](./SETUP.md#3-target-device-credentials-local--tacacs) – **Completed**
