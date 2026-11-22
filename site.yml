@@ -1,0 +1,10 @@
+---
+- name: Configure Hostnames
+  ansible.builtin.import_playbook: playbooks/hostname.yml
+  tags:
+    - hostname
+
+- name: Configure Loopback Interfaces
+  ansible.builtin.import_playbook: playbooks/loopback_interfaces.yml
+  tags:
+    - loopback_interfaces
