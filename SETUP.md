@@ -1194,7 +1194,7 @@ git push origin main
    * **Playbook:** `site.yml`
    * **Credentials:** Select your TACACS+ Machine Credential
    * **Job Tags:** Leave the input field blank and check **Prompt on launch** *(required so GitHub Actions can pass `job_tags` in the API payload)*
-4. Click **Save** and note the numeric **Template ID** from the browser URL (e.g., `/#/templates/job_template/15/details` → `15`).
+4. Click **Save** and note the numeric **Template ID** from the browser URL (e.g., `/#/templates/job_template/17/details` → `17`).
 
 *Verification:* Confirm `Master-Network-Deploy` is saved with `site.yml` selected and **Prompt on launch** enabled on **Job Tags**.
 
@@ -1244,7 +1244,7 @@ jobs:
 
           # Only call the AWX API if at least one network playbook or variable file changed
           if [ -n "$TAGS" ]; then
-            echo "Detected feature changes. Launching Template $TEMPLATE_ID with tags:$TAGS"
+            echo "Detected feature changes. Launching Template $TEMPLATE_ID with tags: $TAGS"
             curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/$TEMPLATE_ID/launch/" \
               -H "Authorization: Bearer $AWX_TOKEN" \
               -H "Content-Type: application/json" \
@@ -1264,7 +1264,7 @@ git commit -m "ci: switch AWX trigger workflow to dynamic tag-based dispatch"
 git push origin main
 ```
 
-*Verification:* In **GitHub → Actions**, confirm the workflow runs and logs `No playbook or host_vars changes detected. Skipping AWX.`
+*Verification:* In **GitHub → Actions**, confirm the workflow runs and logs `No playbook, host_vars, or global group_vars changes detected. Skipping AWX.`
 
 ---
 
@@ -1274,7 +1274,72 @@ git push origin main
 3. **AWX Web UI → Views → Jobs:** Confirm `Master-Network-Deploy` runs a `Source Control Update`, launches with **Job Tags** set to `loopback_interfaces`, executes only `playbooks/loopback_interfaces.yml`, and skips `playbooks/hostname.yml`.
 4. *(Optional Cleanup)* Delete the legacy per-playbook Job Templates (`12` and `13`) in AWX now that all deployments route through `Master-Network-Deploy`.
 
-> **Day 2 Scalability:** Adding a new feature in the future (e.g., `bgp.yml`) only requires creating `playbooks/bgp.yml`, adding `inventory/host_vars/<device>/bgp.yml`, and appending a 4-line import block to `site.yml`—no changes to GitHub Actions or AWX are needed.
+---
+
+### 10.6 Add a Global Multi-Vendor Feature (`inventory/group_vars/all/ntp.yml`)
+For settings shared across every router (such as NTP, Syslog, or login banners), store per-feature variable files under `inventory/group_vars/all/` instead of duplicating them in each device's `host_vars/` directory.
+
+1. **Create the global NTP variable file:**
+   ```bash
+   mkdir -p inventory/group_vars/all
+
+   cat << 'EOF' > inventory/group_vars/all/ntp.yml
+   ---
+   ntp_servers:
+     - server: 162.159.200.1
+       prefer: true
+     - server: 162.159.200.123
+   EOF
+   ```
+
+2. **Create the multi-vendor NTP playbook (`playbooks/ntp.yml`):**
+   ```bash
+   cat << 'EOF' > playbooks/ntp.yml
+   ---
+   - name: Configure NTP Servers from Source of Truth
+     hosts: "{{ target_hosts | default('all') }}"
+     gather_facts: false
+
+     tasks:
+       # --- CISCO IOS TASKS ---
+       - name: Configure NTP servers on Cisco IOS devices
+         cisco.ios.ios_ntp_global:
+           config:
+             servers: "{{ ntp_servers }}"
+           state: merged
+         when: ansible_network_os == 'cisco.ios.ios'
+
+       # --- JUNIPER JUNOS TASKS ---
+       - name: Configure NTP servers on Juniper Junos devices
+         juniper.device.junos_ntp_global:
+           config:
+             servers: "{{ ntp_servers }}"
+           state: merged
+         when: ansible_network_os == 'juniper.device.junos'
+   EOF
+   ```
+
+3. **Register `ntp.yml` in `site.yml`:**
+   ```yaml
+   - name: Configure NTP Servers
+     ansible.builtin.import_playbook: playbooks/ntp.yml
+     tags:
+       - ntp
+   ```
+
+4. **Commit, push, and verify:**
+   ```bash
+   git add inventory/group_vars/all/ntp.yml playbooks/ntp.yml site.yml
+   git commit -m "feat: add multi-vendor NTP playbook and global group_vars/all/ntp.yml"
+   git push origin main
+   ```
+
+*Verification:*
+1. **GitHub → Actions:** Confirms `Detected feature changes. Launching Template <MASTER_TEMPLATE_ID> with tags: ntp`.
+2. **AWX Web UI → Views → Jobs:** `Master-Network-Deploy` runs only the `ntp` tag and succeeds on `CR1`, `CR2`, and `JR1`.
+3. **Routers:** Verify with `show running-config | include ntp` (Cisco IOS) and `show configuration system ntp` (Juniper Junos).
+
+> **Day 2 Scalability:** Adding a new feature only requires creating `playbooks/<feature>.yml`, adding its variable file in either `inventory/host_vars/<device>/<feature>.yml` (per-device) or `inventory/group_vars/all/<feature>.yml` (global), and appending a 4-line import block to `site.yml`—no changes to GitHub Actions or AWX are needed.
 
 ---
 
