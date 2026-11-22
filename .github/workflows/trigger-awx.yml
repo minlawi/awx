@@ -1,7 +1,5 @@
-# Workflow name displayed in the GitHub Actions tab
 name: Trigger AWX Selectively
 
-# Run this workflow whenever code is pushed to the main branch
 on:
   push:
     branches:
@@ -9,44 +7,33 @@ on:
 
 jobs:
   trigger:
-    # Use the local runner hosted on the AWX VM so we can reach AWX over LAN
     runs-on: self-hosted
-
-    strategy:
-      # Continue checking other templates even if one fails
-      fail-fast: false
-      # Map each playbook and its corresponding host_vars filename to an AWX Job Template ID
-      matrix:
-        include:
-          - playbook: set_hostname.yml
-            var_file: hostname.yml
-            template_id: 12
-          - playbook: create_loopback.yml
-            var_file: loopback_interfaces.yml
-            template_id: 13
-
     steps:
-      # Download the repository with the last 2 commits so git diff can compare HEAD vs HEAD~1
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      # Check if the playbook or its matching variable file changed, then trigger AWX via API
-      - name: Check changes and launch AWX
+      - name: Detect changed features and launch AWX
         env:
           AWX_URL: ${{ secrets.AWX_BASE_URL }}
           AWX_TOKEN: ${{ secrets.AWX_API_TOKEN }}
+          TEMPLATE_ID: 17
         run: |
-          # Get the list of files modified in the latest commit
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          # Extract unique filenames (without .yml) from playbooks/ or inventory/host_vars/<device>/
+          TAGS=$(git diff --name-only HEAD~1 HEAD \
+            | grep -E '^(playbooks/|inventory/host_vars/[^/]+/).*\.yml$' \
+            | xargs -r -n1 basename \
+            | sed 's/\.yml$//' \
+            | sort -u \
+            | paste -sd, -)
 
-          # Match either the playbook at repo root or its variable file inside host_vars/<device>/
-          if echo "$CHANGED_FILES" | grep -qE "(^${{ matrix.playbook }}$|/${{ matrix.var_file }}$)"; then
-            echo "Launching Template ID ${{ matrix.template_id }}..."
-            curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
+          if [ -n "$TAGS" ]; then
+            echo "Detected feature changes. Launching Template $TEMPLATE_ID with tags: $TAGS"
+            curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/$TEMPLATE_ID/launch/" \
               -H "Authorization: Bearer $AWX_TOKEN" \
-              -H "Content-Type: application/json"
+              -H "Content-Type: application/json" \
+              -d "{\"job_tags\": \"$TAGS\"}"
           else
-            echo "Skipping ${{ matrix.playbook }} — no changes."
+            echo "No playbook or host_vars changes detected. Skipping AWX."
           fi
