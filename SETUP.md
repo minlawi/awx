@@ -905,3 +905,225 @@ git push origin main
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 9. Multi-Vendor Support (Juniper Junos) and Custom Execution Environment
+
+To support both legacy **Cisco IOS** routers and **Juniper Junos** routers cleanly in AWX, we bake a single multi-vendor **Custom Execution Environment (EE)**. This container image bakes in legacy SSH algorithms for Cisco IOS alongside the PyEZ/NETCONF libraries and the official `juniper.device` collection for Juniper Junos.
+
+> **Why `juniper.device` instead of `junipernetworks.junos`?**  
+> The legacy `junipernetworks.junos` collection is deprecated. **`juniper.device`** is officially maintained by Juniper Networks and uses **NETCONF/PyEZ** (`junos-eznc`), providing native candidate-config commits, automatic diffs, and full compatibility with modern Ansible-core releases.
+
+---
+
+### 9.1 Bake the Multi-Vendor Custom Execution Environment (Podman + K3s)
+Build a custom EE image that resolves legacy Cisco IOS SSH KEX/cipher/host-key negotiation globally inside the container and pre-installs all Juniper Junos dependencies:
+
+```bash
+mkdir -p ~/custom-ee && cd ~/custom-ee
+
+cat << 'EOF' > Dockerfile
+FROM quay.io/ansible/awx-ee:latest
+
+USER root
+
+# 1. Install build tools and Python network libraries
+RUN dnf install -y gcc python3-devel libxml2-devel libxslt-devel libssh-devel openssl-devel && \
+    pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir ansible-pylibssh junos-eznc ncclient && \
+    dnf clean all
+
+# 2. Ensure UID 1000 exists in /etc/passwd with a valid home directory so libssh reads SSH configs
+RUN grep -q ":1000:" /etc/passwd || echo "runner:x:1000:0:runner:/home/runner:/bin/bash" >> /etc/passwd && \
+    mkdir -p /home/runner/.ssh && \
+    printf "Host *\n    KexAlgorithms +diffie-hellman-group14-sha1\n    HostKeyAlgorithms +ssh-rsa\n    PubkeyAcceptedAlgorithms +ssh-rsa\n    StrictHostKeyChecking no\n    UserKnownHostsFile /dev/null\n" | tee /etc/ssh/ssh_config /home/runner/.ssh/config && \
+    chown -R 1000:0 /home/runner && \
+    chmod 700 /home/runner/.ssh && \
+    chmod 600 /home/runner/.ssh/config
+
+# 3. Pre-install Cisco and Juniper collections globally
+RUN ansible-galaxy collection install cisco.ios juniper.device ansible.netcommon -p /usr/share/ansible/collections
+
+# 4. Bake SSH arguments globally into the container environment
+ENV HOME=/home/runner \
+    ANSIBLE_SSH_ARGS="-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa"
+
+USER 1000
+EOF
+```
+```bash
+# Build the multi-vendor EE image
+sudo podman build -t localhost/awx-ee-multivendor:latest .
+```
+```bash
+# Import into K3s containerd and clean up local Podman cache
+sudo podman save localhost/awx-ee-multivendor:latest | sudo k3s ctr images import -
+sudo podman rmi -f localhost/awx-ee-multivendor:latest
+sudo podman image prune -f
+```
+
+*Verification:* Confirm the image is registered in K3s:
+```bash
+sudo k3s crictl images | grep awx-ee-multivendor
+```
+
+---
+
+### 9.2 Register the Custom EE in AWX
+1. Open the **AWX Web UI** (`http://<your-server-ip>:32000`) and go to **Administration** → **Execution Environments** → **Add**.
+2. Configure the EE:
+   * **Name:** `Multi-Vendor Network EE`
+   * **Image:** `localhost/awx-ee-multivendor:latest`
+   * **Pull:** `Never`
+3. Click **Save**.
+4. Update your Job Templates (`set_hostname.yml` — Template `12`, and `create_loopback.yml` — Template `13`) to use `Multi-Vendor Network EE`.
+
+*Verification:* Confirm both Job Templates show `Multi-Vendor Network EE` under **Details** → **Execution Environment**.
+
+---
+
+### 9.3 Enable NETCONF over SSH on the Juniper Router (`JR1`)
+Because `juniper.device` communicates over NETCONF (TCP port `830`), enable NETCONF over SSH on `JR1`:
+
+```junos
+configure
+
+set system host-name JR1-CORE-SG
+set system domain-name test.com
+
+set interfaces em0 unit 0 family inet address 192.168.50.200/24
+
+set system authentication-order tacplus
+set system authentication-order password
+set system root-authentication encrypted-password "P@ssw0rd123"
+
+set system tacplus-server 192.168.50.201 secret "$9$ahJjkq.fznCmfcleK8LGDiHqfTz3/Ap5T"
+set system tacplus-server 192.168.50.201 source-address 192.168.50.200
+
+set system accounting events login
+set system accounting events change-log
+set system accounting events interactive-commands
+
+set system accounting destination tacplus server 192.168.50.201 secret "$9$cZhSKW8L7Vs4X7.5TQn6revM87-Vw2oJN-"
+set system accounting destination tacplus server 192.168.50.201 source-address 192.168.50.200
+
+set system login user admin uid 2000
+set system login user admin class super-user
+set system login user admin authentication encrypted-password "P@ssw0rd123"
+
+set system login user remote full-name "TACACS+ Remote User"
+set system login user remote uid 2001
+set system login user remote class super-user
+
+set system services ssh protocol-version v2
+set system services netconf ssh
+
+commit and-quit
+```
+
+*Verification:* From the AWX VM, confirm TCP port `830` is reachable on `JR1`:
+```bash
+nc -zv <JR1_MGMT_IP> 830
+```
+
+---
+
+### 9.4 Add Juniper (`JR1`) to the Modular Source of Truth
+Onboard `JR1` into `inventory/` using the same per-feature `host_vars` structure (`hostname.yml` and `loopback_interfaces.yml`). Standardize Juniper loopbacks around `lo0` with logical `unit` numbers:
+
+```bash
+mkdir -p inventory/host_vars/JR1
+
+# 1. Add juniper_routers group to inventory/hosts.ini
+cat << 'EOF' >> inventory/hosts.ini
+
+[juniper_routers]
+JR1 ansible_host=192.168.50.200
+EOF
+
+# 2. Define shared Juniper Junos connection variables
+cat << 'EOF' > inventory/group_vars/juniper_routers.yml
+---
+ansible_network_os: juniper.device.junos
+ansible_connection: ansible.netcommon.netconf
+EOF
+
+# 3. Define JR1 hostname variable
+cat << 'EOF' > inventory/host_vars/JR1/hostname.yml
+---
+router_hostname: JR1-SOT-PROD
+EOF
+
+# 4. Define JR1 standardized lo0 logical unit loopback variables
+cat << 'EOF' > inventory/host_vars/JR1/loopback_interfaces.yml
+loopback_interfaces:
+  - name: lo0
+    description: Router-ID
+    ipv4: 10.255.10.3/32
+    unit: 0
+EOF
+```
+
+---
+
+### 9.5 Update Playbooks for Multi-Vendor Execution
+With legacy Cisco SSH algorithms baked into the custom EE, remove any temporary `pre_tasks` from your playbooks and add the `juniper.device` resource module tasks gated by `ansible_network_os`:
+
+**In `set_hostname.yml`:**
+```yaml
+    # --- JUNIPER JUNOS TASKS ---
+    - name: Set hostname on Juniper JUNOS devices
+      juniper.device.junos_hostname:
+        config:
+          hostname: "{{ router_hostname }}"
+        state: merged
+      when: ansible_network_os == 'juniper.device.junos'
+```
+
+**In `create_loopback.yml`:**
+```yaml
+    # --- JUNIPER JUNOS TASKS ---
+    - name: Configure Juniper JUNOS Loopback description and status
+      juniper.device.junos_interfaces:
+        config:
+          - name: "{{ item.name }}"
+            description: "{{ item.description }}"
+            enabled: true
+        state: merged
+      loop: "{{ loopback_interfaces }}"
+      when: ansible_network_os == 'juniper.device.junos'
+
+    - name: Configure Juniper JUNOS Loopback IPv4 address
+      juniper.device.junos_l3_interfaces:
+        config:
+          - name: "{{ item.name }}"
+            unit: "{{ item.unit }}"
+            ipv4:
+              - address: "{{ item.ipv4 }}"
+        state: merged
+      loop: "{{ loopback_interfaces }}"
+      when: ansible_network_os == 'juniper.device.junos'
+```
+
+---
+
+### 9.6 Verify Multi-Vendor Automation End-to-End
+Commit and push the Juniper Source of Truth and playbook updates (no changes are needed in `.github/workflows/trigger-awx.yml` because it already matches `*/hostname.yml` and `*/loopback_interfaces.yml`):
+
+```bash
+git add inventory/ set_hostname.yml create_loopback.yml
+git commit -m "feat: add Juniper Junos support via juniper.device and multi-vendor custom EE"
+git push origin main
+```
+
+*Verification:*
+1. **AWX Web UI → Views → Jobs:** `Git-SOT-Inventory` syncs `JR1` under `juniper_routers`. Both `set_hostname.yml` (Template `12`) and `create_loopback.yml` (Template `13`) succeed against **both** `R1` (Cisco IOS, without `pre_tasks`) and `JR1` (Juniper Junos via NETCONF).
+2. **Juniper Router (`JR1`):** Confirm the hostname and `lo0.0` configuration were committed:
+   ```junos
+   show configuration system host-name
+   show configuration interfaces lo0
+   ```
+3. **Feature-Level Trigger Test:** Edit only `inventory/host_vars/JR1/loopback_interfaces.yml`, push to `main`, and confirm GitHub Actions launches only Template `13` (`create_loopback.yml`) while skipping Template `12`.
+
+---
+
+> [← Back to Project Overview](./README.md)
