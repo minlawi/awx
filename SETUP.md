@@ -571,7 +571,133 @@ git push origin main
 2. **ngrok Terminal:** Logs `POST /api/v2/job_templates/<id>/github/ 202 Accepted`.
 3. **AWX Web UI → Views → Jobs:** The Job Template launches automatically without manual intervention, completes with status **Successful**, and updates `R1`'s hostname to `R1-WEBHOOK-TEST`.
 
-> **Limitation Noted for Next Phases:** Free `ngrok` URLs rotate on every restart, and standard GitHub Webhooks fire on *every* push—triggering all linked templates regardless of which file changed. In **Tasks 7 & 8**, we resolve both issues using **GitHub Actions** and a **local Self-Hosted Runner**.
+> **Limitation Noted for Next Phases:** Free `ngrok` URLs rotate on every restart, and standard GitHub Webhooks fire on *every* push—triggering all linked templates regardless of which file changed. In **Tasks 7**, we resolve both issues using **GitHub Actions** and a **local Self-Hosted Runner**.
+
+---
+
+> [← Back to Project Overview](./README.md)
+
+## 7. Deploy GitHub Self-Hosted Runner and Configure Selective GitHub Actions (CI/CD)
+
+To eliminate `ngrok` and stop every `git push` from triggering all AWX Job Templates at once, we deploy a **GitHub Self-Hosted Runner** directly on the AWX VM and use **GitHub Actions** to call the AWX REST API over the local LAN only when a specific playbook changes.
+
+---
+
+### 7.1 Deploy the GitHub Self-Hosted Runner on the AWX VM
+1. In your GitHub repository, navigate to **Settings** → **Actions** → **Runners** → **New self-hosted runner**.
+2. Select **Linux** and **x64**.
+3. On your AWX VM, run the download and configuration commands provided by GitHub:
+
+   ```bash
+   mkdir -p ~/actions-runner && cd ~/actions-runner
+
+   # Download and extract the runner package (use the latest URL from GitHub UI)
+   curl -o actions-runner-linux-x64.tar.gz -L <GITHUB_RUNNER_DOWNLOAD_URL>
+   tar xzf ./actions-runner-linux-x64.tar.gz
+
+   # Register the runner with your repository
+   ./config.sh --url [https://github.com/](https://github.com/)<your-username>/<your-repo> --token <REGISTRATION_TOKEN>
+   ```
+   *(Accept the default runner group, name, and labels—including `self-hosted`—when prompted.)*
+   
+4. Install and start the runner as a background `systemd` service so it stays online across reboots:
+   ```bash
+   sudo ./svc.sh install
+   sudo ./svc.sh start
+   sudo ./svc.sh status
+   ```
+
+*Verification:* Return to GitHub **Settings** → **Actions** → **Runners** and confirm your runner is listed with a green **Idle** status.
+
+---
+
+### 7.2 Create an AWX API Token and Add GitHub Repository Secrets
+1. **Generate an AWX Personal Access Token (PAT):**
+   * Open the **AWX Web UI** (`http://<your-server-ip>:32000`).
+   * Go to **Access** → **Users** → click your admin user → open the **Tokens** tab → click **Add**.
+   * Set **Scope** to `Write`, click **Save**, and copy the generated token immediately.
+2. **Find Your Job Template IDs:**
+   * Open each Job Template in AWX and note its ID from the browser URL (e.g., `/#/templates/job_template/12/details` → `12` for `set_hostname.yml`).
+3. **Store Credentials in GitHub Secrets:**
+   * In your GitHub repository, go to **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
+   * Add the following secrets:
+     * `AWX_BASE_URL`: `http://<your-server-ip>:32000` *(no trailing slash)*
+     * `AWX_API_TOKEN`: `<your-awx-personal-access-token>`
+
+*Verification:* Confirm both `AWX_BASE_URL` and `AWX_API_TOKEN` appear under **Repository secrets**[cite: 11].
+
+---
+
+### 7.3 Create the Matrix-Driven Selective GitHub Actions Workflow
+Instead of maintaining a separate workflow file for every playbook, create a single `.github/workflows/trigger-awx.yml` file that maps each playbook to its AWX Job Template ID and uses `git diff` against the previous commit (`HEAD~1`) to launch only modified playbooks[cite: 11]:
+
+> **Note:** This CI workflow code was generated using **Gemini – Neon Model**.
+
+```bash
+mkdir -p .github/workflows
+
+cat << 'EOF' > .github/workflows/trigger-awx.yml
+name: Trigger AWX on Modified Playbook
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  trigger:
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - playbook: set_hostname.yml
+            template_id: 12 # Get this ID from Step 7.2.2
+          # Future playbooks: just add 2 lines (playbook + template_id)
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check and launch ${{ matrix.playbook }} (Template${{ matrix.template_id }})
+        run: |
+          if git diff --name-only HEAD~1 HEAD | grep -qx "${{ matrix.playbook }}"; then
+            echo "Change detected in ${{ matrix.playbook }} – launching AWX template${{ matrix.template_id }}..."
+            curl -fsS -X POST "${{ secrets.AWX_BASE_URL }}/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
+              -H "Authorization: Bearer ${{ secrets.AWX_API_TOKEN }}" \
+              -H "Content-Type: application/json"
+          else
+            echo "No changes in ${{ matrix.playbook }} – skipping."
+          fi
+EOF
+```
+
+Push the workflow to GitHub:
+```bash
+git add .github/workflows/trigger-awx.yml
+git commit -m "ci: add matrix-based AWX trigger workflow for self-hosted runner"
+git push origin main
+```
+
+---
+
+### 7.4 Verify Selective Triggering Over LAN (Without `ngrok`)
+1. Stop `ngrok` if it is still running, and delete or disable the old GitHub Webhook under **Settings** → **Webhooks**.
+2. **Test 1 — Unrelated File Change (Should Skip All Templates):**
+   * Edit `README.md` and push to `main`.
+   * Open **GitHub → Actions → Trigger AWX on Modified Playbook** and confirm both matrix jobs log `No changes in <playbook> – skipping.`
+3. **Test 2 — Single Playbook Change (Should Trigger Only That Template):**
+   * Update the hostname inside `set_hostname.yml` and push to `main`:
+
+     ```bash
+     git add set_hostname.yml
+     git commit -m "test: trigger AWX over LAN via self-hosted GitHub Actions runner"
+     git push origin main
+     ```
+
+*Verification:*
+1. **GitHub → Actions:** `set_hostname.yml` logs `Change detected in set_hostname.yml – launching AWX template 12...`.
+2. **AWX Web UI → Views → Jobs:** Only Template `12` (`set_hostname.yml`) launches and completes with status **Successful** over the private LAN, updating `R1`'s hostname to `R1-ACTIONS-LAN` with `ngrok` completely turned off.
 
 ---
 
