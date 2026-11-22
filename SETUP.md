@@ -290,3 +290,163 @@ When running against an older Cisco IOS image in EVE-NG using the **Default Exec
 > **How to Fix This Issue:** Follow **[1. Legacy Cisco IOS SSH Key Exchange Failure (`no acceptable kex algorithm`)](./TROUBLESHOOTING.md#1-legacy-cisco-ios-ssh-key-exchange-failure-no-acceptable-kex-algorithm)** in `TROUBLESHOOTING.md` to bake a custom Cisco Execution Environment (`localhost/awx-ee-cisco:latest`), assign it to this Job Template, and re-run the job.
 
 *Verification:* Once the custom Execution Environment is assigned and the Job Template is re-launched, the job finishes with status **Successful** (green) and `show running-config | include hostname` on the router confirms `hostname R1-AUTOMATED`.
+
+> [← Back to Project Overview](./README.md)
+
+## 4. Configure TARANAC (TACACS+) and Verify Direct SSH Authentication
+
+Before integrating TACACS+ with Ansible AWX, we configure **TARANAC** (deployed via the official OVA appliance), apply AAA on the target Cisco IOS router, and verify direct SSH login from the Ubuntu VM to confirm centralized authentication works end-to-end.
+
+> **Prerequisite:** Deploy the TARANAC OVA virtual appliance on your hypervisor with L3 reachability to your EVE-NG routers and AWX VM. Download the official OVA file from **[taranac.pro/download](https://taranac.pro/download/)**.
+
+---
+
+### 4.1 Configure Identity, Network Objects, Devices, and AAA Policy in TARANAC Web UI
+Log in to the **TARANAC Web UI** (`https://<TARANAC_SERVER_IP>`) and complete the following six steps:
+
+1. **Create User** (`INFRASTRUCTURE` → `Identity` → `Users` → `New User`)
+   * **Username:** `<tacacs-username>` *(e.g., `tacacs_admin`)*
+   * **Email:** `<user-email>` *(e.g., `tacacs_admin@example.com`)*
+   * **Password:** `<tacacs-user-password>`
+   * Click **Create User**.
+
+2. **Create Group** (`INFRASTRUCTURE` → `Identity` → `Groups` → `New Group`)
+   * **Name:** `<group-name>` *(e.g., `Network-Admins`)*
+   * Toggle **Admin group** ON.
+   * **Enable Password → Mode:** Select `Login Password`.
+   * **Members:** Click **+ Add Members** and add the user created in **Step 1**.
+   * Click **Create Group**.
+
+3. **Create Network Object** (`INFRASTRUCTURE` → `Network` → `Network Objects` → `New Network Object`)
+   * **Name:** `<object-name>` *(e.g., `R1-IP`)*
+   * **Entry Type:** `Host (single IP)`
+   * **IP Address:** `192.168.50.186` *(your EVE-NG Cisco router management IP)*
+   * Click **Create Network Object**.
+
+4. **Create Device Group** (`INFRASTRUCTURE` → `Network` → `Device Groups` → `New Device Group`)
+   * **Name:** `<device-group-name>` *(e.g., `Cisco-Routers`)*
+   * **TACACS+ Key:** `<your-shared-secret>` *(must match the router AAA config)*
+   * Click **Create Device Group**.
+
+5. **Create Device** (`INFRASTRUCTURE` → `Network` → `Devices` → `New Device`)
+   * **Name:** `R1`
+   * **Hostname:** `<router-hostname>` *(e.g., `R1`)*
+   * **Network Object:** Click **+ Select...** and choose the Network Object created in **Step 3**.
+   * **Device Groups:** Click **+ Add** and select the Device Group created in **Step 4**.
+   * **Protocol Support:** Enable **TACACS+** only *(leave `RADIUS` and `NAC` disabled)*.
+   * **TACACS+ Key:** `<your-shared-secret>` *(must match the router AAA config)*.
+   * Click **Create Device**.
+
+6. **Create AAA Policy** (`AAA` → `Policies` → `Policy Table` → `New Policy Rule`)
+   * **Description:** Enter a rule description (e.g., `Network Admins -> TACACS+ General Full Access (priv 15)`) and ensure **Enabled** is toggled ON.
+   * **Match Conditions:**
+     * **Who:** Click **+ Add** under **Users** and **Groups** to add the user and group from **Steps 1–2**.
+     * **Where:** Click **+ Add** under **Devices** and **Device Groups** to add the device and device group from **Steps 4–5**.
+     * **Source → Source Networks:** Click **+ Add** to add your allowed source network(s).
+   * **Protocol Actions:**
+     * **TACACS+ → Mode:** `Profile`
+     * **Profile:** `General Full Access (priv 15)` *(Cisco IOS / IOS-XE)*
+     * **RADIUS → Mode:** `None`
+   * Save the policy rule.
+
+*Verification:* Confirm there are no pending undeployed changes on the TARANAC dashboard and that the new rule appears as **Enabled** in `AAA` → `Policies` → `Policy Table`.
+
+---
+
+### 4.2 Configure TACACS+ AAA on the Cisco IOS Router
+> **Reference:** Official [TARANAC Cisco IOS / IOS-XE Configuration Guide](https://taranac.pro/docs/devices/cisco-ios/)
+
+Connect to `R1` via console or your existing local SSH session and apply the AAA configuration below. Always keep `local` as a fallback method so you do not get locked out if the TACACS+ appliance is unreachable.
+
+```ios
+enable
+
+configure terminal
+
+hostname R1
+
+no ip domain lookup
+ip domain name test.com
+
+service password-encryption
+password encryption aes
+
+enable secret P@ssw0rd123
+username admin privilege 15 secret P@ssw0rd123
+
+crypto key generate rsa modulus 2048
+ip tacacs source-interface <source-interface>
+ip ssh version 2
+
+aaa new-model
+
+tacacs server TARANAC-01
+ address ipv4 <tacacs-server-ip>
+ key <tacacs-secret>
+
+aaa group server tacacs+ TARANAC-GRP
+ server name TARANAC-01
+
+aaa authentication login default group TARANAC-GRP local
+aaa authentication login CONSOLE local
+aaa authentication enable default group TARANAC-GRP enable
+
+aaa authorization config-commands
+aaa authorization exec default group TARANAC-GRP local
+aaa authorization commands 0  default group TARANAC-GRP local
+aaa authorization commands 1  default group TARANAC-GRP local
+aaa authorization commands 15 default group TARANAC-GRP local
+
+aaa accounting exec default start-stop group TARANAC-GRP
+aaa accounting commands 0  default start-stop group TARANAC-GRP
+aaa accounting commands 1  default start-stop group TARANAC-GRP
+aaa accounting commands 15 default start-stop group TARANAC-GRP
+
+line vty 0 4
+ login authentication default
+ transport input ssh
+```
+
+---
+
+### 4.3 Verify Direct TACACS+ Authentication (Without AWX)
+
+#### Step 1: Test AAA Directly from the Cisco Router
+From `R1`'s privileged EXEC prompt, test the TACACS+ credentials directly against TARANAC:
+```ios
+R1# test aaa group TARANAC-GRP tacacs_admin <tacacs-user-password> legacy
+```
+*Expected Output:*
+```text
+Attempting authentication test to server-group TARANAC-GRP using tacacs+
+User was successfully authenticated.
+```
+
+#### Step 2: Verify Direct SSH Login from the Ubuntu VM
+From your Ubuntu terminal (without AWX), SSH into `R1` using the TARANAC account. Configure `~/.ssh/config` on Ubuntu to permanently allow `legacy SSH algorithms` for your lab subnet `192.168.50.*`:
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+
+cat << 'EOF' >> ~/.ssh/config
+Host 192.168.50.*
+    KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+    HostKeyAlgorithms +ssh-rsa
+    PubkeyAcceptedAlgorithms +ssh-rsa
+    Ciphers +aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc
+EOF
+
+chmod 600 ~/.ssh/config
+```
+
+Now you can connect cleanly with a standard SSH command:
+```bash
+ssh tacacs_admin@192.168.50.186
+```
+
+*Verification:*
+1. You successfully log in to `R1#` using the `tacacs_admin` password.
+2. Run `show privilege` on `R1` and confirm it returns `Current privilege level is 15`.
+3. Open the **TARANAC Web UI** → **AAA Logs** (Authentication & Session/Accounting logs) and confirm a successful login entry for `tacacs_admin` from `192.168.50.186`.
+
+> [← Back to Project Overview](./README.md)
