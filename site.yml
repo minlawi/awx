@@ -8,3 +8,8 @@
   ansible.builtin.import_playbook: playbooks/loopback_interfaces.yml
   tags:
     - loopback_interfaces
+
+- name: Configure NTP Servers
+  ansible.builtin.import_playbook: playbooks/ntp.yml
+  tags:
+    - ntp

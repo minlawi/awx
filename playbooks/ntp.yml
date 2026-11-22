@@ -1,0 +1,21 @@
+---
+- name: Configure NTP Servers from Source of Truth
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+
+  tasks:
+    # --- CISCO IOS TASKS ---
+    - name: Configure NTP servers on Cisco IOS devices
+      cisco.ios.ios_ntp_global:
+        config:
+          servers: "{{ ntp_servers }}"
+        state: merged
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    # --- JUNIPER JUNOS TASKS ---
+    - name: Configure NTP servers on Juniper Junos devices
+      juniper.device.junos_ntp_global:
+        config:
+          servers: "{{ ntp_servers }}"
+        state: merged
+      when: ansible_network_os == 'juniper.device.junos'
