@@ -1066,9 +1066,9 @@ EOF
 ---
 
 ### 9.5 Update Playbooks for Multi-Vendor Execution
-With legacy Cisco SSH algorithms baked into the custom EE, remove any temporary `pre_tasks` from your playbooks and add the `juniper.device` resource module tasks gated by `ansible_network_os`:
 
-**In `set_hostname.yml`:**
+**Add this task In `set_hostname.yml`:**
+
 ```yaml
     # --- JUNIPER JUNOS TASKS ---
     - name: Set hostname on Juniper JUNOS devices
@@ -1079,7 +1079,8 @@ With legacy Cisco SSH algorithms baked into the custom EE, remove any temporary 
       when: ansible_network_os == 'juniper.device.junos'
 ```
 
-**In `create_loopback.yml`:**
+**Add this task In `create_loopback.yml`:**
+
 ```yaml
     # --- JUNIPER JUNOS TASKS ---
     - name: Configure Juniper JUNOS Loopback description and status
