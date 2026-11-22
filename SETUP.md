@@ -9,7 +9,7 @@ sudo apt update && sudo apt upgrade -y
 
 ### 1.2 Install K3s
 ```bash
-curl -sfL [https://get.k3s.io](https://get.k3s.io) | sh -
+curl -sfL https://get.k3s.io | sh -
 ```
 
 ### 1.3 Grant Non-Root User Access to K3s Config
@@ -201,13 +201,12 @@ ssh -i ~/.ssh/awx_github_key -T git@github.com
 In this phase, we push a simple `set_hostname.yml` playbook to GitHub, create the matching inventory group and local credentials in AWX, and run the Job Template manually using AWX's **Default Execution Environment** to reproduce the legacy Cisco IOS SSH algorithm error before applying our custom EE fix.
 
 ### 3.1 Push `set_hostname.yml` to Your GitHub Repository
-In your local Git repository, create a simple `set_hostname.yml` playbook targeting the `cisco_routers` group and push it to `main`:
+In your local Git repository, create a simple `set_hostname.yml` playbook inside `playbooks/` targeting the `cisco_routers` group and push it to `main`:
 
 ```bash
-mkdir -p playbooks && cd playbooks
-```
-```bash
-cat << 'EOF' > set_hostname.yml
+mkdir -p playbooks
+
+cat << 'EOF' > playbooks/set_hostname.yml
 ---
 - name: Configure Cisco IOS Hostname
   hosts: cisco_routers
@@ -226,7 +225,7 @@ git commit -m "feat: add initial Cisco IOS set_hostname playbook"
 git push origin main
 ```
 
-*Verification:* Confirm `set_hostname.yml` appears in your GitHub repository under the `main` branch.
+*Verification:* Confirm `playbooks/set_hostname.yml` appears in your GitHub repository under the `main` branch.
 
 ---
 
@@ -561,7 +560,7 @@ In this phase, we move from manual job execution to event-driven automation. Bec
 ---
 
 ### 6.4 Test Automatic Triggering on `git push`
-Make a quick change to `set_hostname.yml` (such as updating the target hostname) and push it to `main`:
+Make a quick change to `playbooks/set_hostname.yml` (such as updating the target hostname) and push it to `main`:
 
 ```bash
 git add playbooks/set_hostname.yml
@@ -574,7 +573,7 @@ git push origin main
 2. **ngrok Terminal:** Logs `POST /api/v2/job_templates/<id>/github/ 202 Accepted`.
 3. **AWX Web UI → Views → Jobs:** The Job Template launches automatically without manual intervention, completes with status **Successful**, and updates `R1`'s hostname to `R1-WEBHOOK-TEST`.
 
-> **Limitation Noted for Next Phases:** Free `ngrok` URLs rotate on every restart, and standard GitHub Webhooks fire on *every* push—triggering all linked templates regardless of which file changed. In **Tasks 7**, we resolve both issues using **GitHub Actions** and a **local Self-Hosted Runner**.
+> **Limitation Noted for Next Phases:** Free `ngrok` URLs rotate on every restart, and standard GitHub Webhooks fire on *every* push—triggering all linked templates regardless of which file changed. In **Task 7**, we resolve both issues using **GitHub Actions** and a **local Self-Hosted Runner**.
 
 ---
 
@@ -599,10 +598,10 @@ To eliminate `ngrok` and stop every `git push` from triggering all AWX Job Templ
    tar xzf ./actions-runner-linux-x64.tar.gz
 
    # Register the runner with your repository
-   ./config.sh --url [https://github.com/](https://github.com/)<your-username>/<your-repo> --token <REGISTRATION_TOKEN>
+   ./config.sh --url https://github.com/<your-username>/<your-repo> --token <REGISTRATION_TOKEN>
    ```
    *(Accept the default runner group, name, and labels—including `self-hosted`—when prompted.)*
-   
+
 4. Install and start the runner as a background `systemd` service so it stays online across reboots:
    ```bash
    sudo ./svc.sh install
@@ -627,12 +626,12 @@ To eliminate `ngrok` and stop every `git push` from triggering all AWX Job Templ
      * `AWX_BASE_URL`: `http://<your-server-ip>:32000` *(no trailing slash)*
      * `AWX_API_TOKEN`: `<your-awx-personal-access-token>`
 
-*Verification:* Confirm both `AWX_BASE_URL` and `AWX_API_TOKEN` appear under **Repository secrets**[cite: 11].
+*Verification:* Confirm both `AWX_BASE_URL` and `AWX_API_TOKEN` appear under **Repository secrets**.
 
 ---
 
 ### 7.3 Create the Matrix-Driven Selective GitHub Actions Workflow
-Instead of maintaining a separate workflow file for every playbook, create a single `.github/workflows/trigger-awx.yml` file that maps each playbook to its AWX Job Template ID and uses `git diff` against the previous commit (`HEAD~1`) to launch only modified playbooks[cite: 11]:
+Instead of maintaining a separate workflow file for every playbook, create a single `.github/workflows/trigger-awx.yml` file that maps each playbook to its AWX Job Template ID and uses `git diff` against the previous commit (`HEAD~1`) to launch only modified playbooks:
 
 > **Note:** This CI workflow code was generated using **Gemini – Neon Model**.
 
@@ -662,10 +661,10 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Check and launch ${{ matrix.playbook }} (Template${{ matrix.template_id }})
+      - name: Check and launch ${{ matrix.playbook }} (Template ${{ matrix.template_id }})
         run: |
           if git diff --name-only HEAD~1 HEAD | grep -qx "${{ matrix.playbook }}"; then
-            echo "Change detected in ${{ matrix.playbook }} – launching AWX template${{ matrix.template_id }}..."
+            echo "Change detected in ${{ matrix.playbook }} – launching AWX template ${{ matrix.template_id }}..."
             curl -fsS -X POST "${{ secrets.AWX_BASE_URL }}/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
               -H "Authorization: Bearer ${{ secrets.AWX_API_TOKEN }}" \
               -H "Content-Type: application/json"
@@ -690,7 +689,7 @@ git push origin main
    * Edit `README.md` and push to `main`.
    * Open **GitHub → Actions → Trigger AWX on Modified Playbook** and confirm both matrix jobs log `No changes in <playbook> – skipping.`
 3. **Test 2 — Single Playbook Change (Should Trigger Only That Template):**
-   * Update the hostname inside `set_hostname.yml` and push to `main`:
+   * Update the hostname inside `playbooks/set_hostname.yml` and push to `main`:
 
      ```bash
      git add playbooks/set_hostname.yml
@@ -699,7 +698,7 @@ git push origin main
      ```
 
 *Verification:*
-1. **GitHub → Actions:** `set_hostname.yml` logs `Change detected in set_hostname.yml – launching AWX template 12...`.
+1. **GitHub → Actions:** `playbooks/set_hostname.yml` logs `Change detected in playbooks/set_hostname.yml – launching AWX template 12...`.
 2. **AWX Web UI → Views → Jobs:** Only Template `12` (`set_hostname.yml`) launches and completes with status **Successful** over the private LAN, updating `R1`'s hostname to `R1-ACTIONS-LAN` with `ngrok` completely turned off.
 
 ---
@@ -734,13 +733,13 @@ ansible_connection: ansible.netcommon.network_cli
 EOF
 
 # 3. Define device-specific hostname variable
-cat << 'EOF' > inventory/host_vars/R1/hostname.yml
+cat << 'EOF' > inventory/host_vars/CR1/hostname.yml
 ---
-router_hostname: R1-SOT-PROD
+router_hostname: CR1-SOT-PROD
 EOF
 
 # 4. Define device-specific loopback interface variables
-cat << 'EOF' > inventory/host_vars/R1/loopback_interfaces.yml
+cat << 'EOF' > inventory/host_vars/CR1/loopback_interfaces.yml
 ---
 loopback_interfaces:
   - name: Loopback0
@@ -754,14 +753,12 @@ EOF
 ---
 
 ### 8.2 Refactor Playbooks to Be Dynamic and Variable-Driven
-Update `set_hostname.yml` and `create_loopback.yml` so they pull values dynamically from `host_vars` rather than hardcoding them:
+Update `playbooks/set_hostname.yml` and `playbooks/create_loopback.yml` so they pull values dynamically from `host_vars` rather than hardcoding them:
 
 ```bash
-mkdir -p playbooks && cd playbooks
-```
+mkdir -p playbooks
 
-```bash
-cat << 'EOF' > set_hostname.yml
+cat << 'EOF' > playbooks/set_hostname.yml
 ---
 - name: Configure Cisco IOS Hostname from Source of Truth
   hosts: cisco_routers
@@ -776,7 +773,7 @@ cat << 'EOF' > set_hostname.yml
 EOF
 ```
 ```bash
-cat << 'EOF' > create_loopback.yml
+cat << 'EOF' > playbooks/create_loopback.yml
 ---
 - name: Configure Cisco IOS Loopback Interfaces from Source of Truth
   hosts: cisco_routers
@@ -820,7 +817,7 @@ Replace the manually created hosts in AWX with a dynamic inventory sourced direc
    * Click **Save**, then click **Sync**.
 3. Update both Job Templates (`set_hostname.yml` — Template `12`, and `create_loopback.yml` — Template `13`) to use `Git-SOT-Inventory` as their **Inventory**.
 
-*Verification:* Open `Git-SOT-Inventory` → **Groups** → `cisco_routers` → **Hosts** and confirm `R1` is synced automatically with its `group_vars` and `host_vars` loaded.
+*Verification:* Open `Git-SOT-Inventory` → **Groups** → `cisco_routers` → **Hosts** and confirm `CR1` is synced automatically with its `group_vars` and `host_vars` loaded.
 
 ---
 
@@ -874,7 +871,7 @@ jobs:
           # Get the list of files modified in the latest commit
           CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
 
-          # Match either the playbook at repo root or its variable file inside host_vars/<device>/
+          # Match either the playbook in playbooks/ or its variable file inside host_vars/<device>/
           if echo "$CHANGED_FILES" | grep -qE "(^${{ matrix.playbook }}$|/${{ matrix.var_file }}$)"; then
             echo "Launching Template ID ${{ matrix.template_id }}..."
             curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
@@ -899,16 +896,16 @@ git push origin main
 Test that editing a single Source of Truth file triggers only its matching AWX Job Template:
 
 ```bash
-git add inventory/host_vars/R1/hostname.yml
-git commit -m "change(R1): update hostname in Source of Truth"
+git add inventory/host_vars/CR1/hostname.yml
+git commit -m "change(CR1): update hostname in Source of Truth"
 git push origin main
 ```
 
 *Verification:*
 1. **GitHub → Actions (`Trigger AWX Selectively`):**
-   * `set_hostname.yml` logs `Launching Template ID 12...`
-   * `create_loopback.yml` logs `Skipping create_loopback.yml - no changes.`
-2. **AWX Web UI → Views → Jobs:** `Git-SOT-Inventory` syncs automatically, Template `12` completes with status **Successful**, and `show running-config | include hostname` on `R1` confirms `hostname R1-SOT-VERIFIED`.
+   * `playbooks/set_hostname.yml` logs `Launching Template ID 12...`
+   * `playbooks/create_loopback.yml` logs `Skipping playbooks/create_loopback.yml - no changes.`
+2. **AWX Web UI → Views → Jobs:** `Git-SOT-Inventory` syncs automatically, Template `12` completes with status **Successful**, and `show running-config | include hostname` on `CR1` confirms the updated hostname.
 
 ---
 
@@ -1075,7 +1072,7 @@ EOF
 
 ### 9.5 Update Playbooks for Multi-Vendor Execution
 
-**Add this task In `set_hostname.yml`:**
+**Add this task in `playbooks/set_hostname.yml`:**
 
 ```yaml
     # --- JUNIPER JUNOS TASKS ---
@@ -1087,7 +1084,7 @@ EOF
       when: ansible_network_os == 'juniper.device.junos'
 ```
 
-**Add this task In `create_loopback.yml`:**
+**Add this task in `playbooks/create_loopback.yml`:**
 
 ```yaml
     # --- JUNIPER JUNOS TASKS ---
@@ -1125,13 +1122,150 @@ git push origin main
 ```
 
 *Verification:*
-1. **AWX Web UI → Views → Jobs:** `Git-SOT-Inventory` syncs `JR1` under `juniper_routers`. Both `set_hostname.yml` (Template `12`) and `create_loopback.yml` (Template `13`) succeed against **both** `R1` (Cisco IOS, without `pre_tasks`) and `JR1` (Juniper Junos via NETCONF).
+1. **AWX Web UI → Views → Jobs:** `Git-SOT-Inventory` syncs `JR1` under `juniper_routers`. Both `set_hostname.yml` (Template `12`) and `create_loopback.yml` (Template `13`) succeed against **both** `CR1` (Cisco IOS, without `pre_tasks`) and `JR1` (Juniper Junos via NETCONF).
 2. **Juniper Router (`JR1`):** Confirm the hostname and `lo0.0` configuration were committed:
    ```junos
    show configuration system host-name
    show configuration interfaces lo0
    ```
 3. **Feature-Level Trigger Test:** Edit only `inventory/host_vars/JR1/loopback_interfaces.yml`, push to `main`, and confirm GitHub Actions launches only Template `13` (`create_loopback.yml`) while skipping Template `12`.
+
+---
+
+> [← Back to Project Overview](./README.md)
+
+## 10. Refactor to Master `site.yml` and Dynamic Tag-Based CI/CD
+
+To scale Day 2 operations without manually editing `.github/workflows/trigger-awx.yml` or creating new AWX Job Templates for every new network feature, we consolidate execution behind a single root `site.yml` dispatcher and a single master AWX Job Template. GitHub Actions dynamically extracts Ansible tags from modified filenames and passes them to AWX via the REST API.
+
+---
+
+### 10.1 Align Playbook Filenames with `host_vars`
+Rename the playbooks inside `playbooks/` so their base filenames match the corresponding per-feature files in `inventory/host_vars/<device>/`:
+
+```bash
+git mv playbooks/set_hostname.yml playbooks/hostname.yml
+git mv playbooks/create_loopback.yml playbooks/loopback_interfaces.yml
+```
+
+*Verification:* Run `ls playbooks/` and confirm it contains `hostname.yml` and `loopback_interfaces.yml`.
+
+---
+
+### 10.2 Create the Master `site.yml` Dispatcher
+Create `site.yml` at the repository root to import each feature playbook and assign a tag matching its filename (without `.yml`):
+
+```bash
+cat << 'EOF' > site.yml
+---
+- name: Configure Hostnames
+  ansible.builtin.import_playbook: playbooks/hostname.yml
+  tags:
+    - hostname
+
+- name: Configure Loopback Interfaces
+  ansible.builtin.import_playbook: playbooks/loopback_interfaces.yml
+  tags:
+    - loopback_interfaces
+EOF
+```
+
+Commit and push the new structure so AWX can detect `site.yml`:
+
+```bash
+git add playbooks/ site.yml
+git commit -m "refactor: align playbook names and add root site.yml master dispatcher"
+git push origin main
+```
+
+*Verification:* Confirm `site.yml`, `playbooks/hostname.yml`, and `playbooks/loopback_interfaces.yml` appear on the `main` branch in GitHub.
+
+---
+
+### 10.3 Create the Master Job Template in AWX
+1. Open the **AWX Web UI** (`http://<your-server-ip>:32000`), go to **Resources** → **Projects**, and trigger a sync on `Network-Automation-SOT` so AWX pulls `site.yml`.
+2. Navigate to **Resources** → **Templates** → **Add** → **Add job template**.
+3. Configure the master template:
+   * **Name:** `Master-Network-Deploy`
+   * **Job Type:** `Run`
+   * **Inventory:** `Git-SOT-Inventory`
+   * **Project:** `Network-Automation-SOT`
+   * **Execution Environment:** `Multi-Vendor Network EE`
+   * **Playbook:** `site.yml`
+   * **Credentials:** Select your TACACS+ Machine Credential
+   * **Job Tags:** Leave the input field blank and check **Prompt on launch** *(required so GitHub Actions can pass `job_tags` in the API payload)*
+4. Click **Save** and note the numeric **Template ID** from the browser URL (e.g., `/#/templates/job_template/15/details` → `15`).
+
+*Verification:* Confirm `Master-Network-Deploy` is saved with `site.yml` selected and **Prompt on launch** enabled on **Job Tags**.
+
+---
+
+### 10.4 Update GitHub Actions for Dynamic Tag-Based Dispatch
+Replace the hardcoded matrix in `.github/workflows/trigger-awx.yml` with a single job that reads `git diff`, extracts unique feature tags from changed files under `playbooks/` or `inventory/host_vars/<device>/`, and launches the master Job Template with `job_tags`. Replace `<MASTER_TEMPLATE_ID>` with the ID from Step 10.3:
+
+```bash
+cat << 'EOF' > .github/workflows/trigger-awx.yml
+name: Trigger AWX Selectively
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  trigger:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed features and launch AWX
+        env:
+          AWX_URL: ${{ secrets.AWX_BASE_URL }}
+          AWX_TOKEN: ${{ secrets.AWX_API_TOKEN }}
+          TEMPLATE_ID: <MASTER_TEMPLATE_ID>
+        run: |
+          # Extract unique filenames (without .yml) from playbooks/ or inventory/host_vars/<device>/
+          TAGS=$(git diff --name-only HEAD~1 HEAD \
+            | grep -E '^(playbooks/|inventory/host_vars/[^/]+/).*\.yml$' \
+            | xargs -r -n1 basename \
+            | sed 's/\.yml$//' \
+            | sort -u \
+            | paste -sd, -)
+
+          if [ -n "$TAGS" ]; then
+            echo "Detected feature changes. Launching Template $TEMPLATE_ID with tags: $TAGS"
+            curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/$TEMPLATE_ID/launch/" \
+              -H "Authorization: Bearer $AWX_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"job_tags\": \"$TAGS\"}"
+          else
+            echo "No playbook or host_vars changes detected. Skipping AWX."
+          fi
+EOF
+```
+
+Commit and push the workflow update:
+
+```bash
+git add .github/workflows/trigger-awx.yml
+git commit -m "ci: switch AWX trigger workflow to dynamic tag-based dispatch"
+git push origin main
+```
+
+*Verification:* In **GitHub → Actions**, confirm the workflow runs and logs `No playbook or host_vars changes detected. Skipping AWX.`
+
+---
+
+### 10.5 Verify Dynamic Tag-Based Automation End-to-End
+1. **Feature-Level Trigger Test:** Edit a single feature variable file (such as `inventory/host_vars/JR1/loopback_interfaces.yml`), commit, and push to `main`.
+2. **GitHub → Actions:** Confirm the job logs `Detected feature changes. Launching Template <MASTER_TEMPLATE_ID> with tags: loopback_interfaces`.
+3. **AWX Web UI → Views → Jobs:** Confirm `Master-Network-Deploy` runs a `Source Control Update`, launches with **Job Tags** set to `loopback_interfaces`, executes only `playbooks/loopback_interfaces.yml`, and skips `playbooks/hostname.yml`.
+4. *(Optional Cleanup)* Delete the legacy per-playbook Job Templates (`12` and `13`) in AWX now that all deployments route through `Master-Network-Deploy`.
+
+> **Day 2 Scalability:** Adding a new feature in the future (e.g., `bgp.yml`) only requires creating `playbooks/bgp.yml`, adding `inventory/host_vars/<device>/bgp.yml`, and appending a 4-line import block to `site.yml`—no changes to GitHub Actions or AWX are needed.
 
 ---
 

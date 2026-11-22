@@ -1,6 +1,6 @@
 # Multi-Vendor Network Automation CI/CD Pipeline (AWX, GitOps & TACACS+)
 
-This project automates network configuration updates for Cisco IOS and Juniper Junos devices. It uses a Git repository as the single source of truth—whenever changes are pushed, a local GitHub Actions runner checks what was modified over the LAN and triggers only the specific Ansible AWX Job Template needed for that playbook or feature variable file. This approach stops manual configuration drift and avoids running unnecessary playbooks, all while keeping deployments secure with centralized TACACS+ authentication and custom Execution Environments.
+This project automates network configuration updates for Cisco IOS and Juniper Junos devices. It uses a Git repository as the single source of truth—whenever changes are pushed, a local GitHub Actions runner detects modified playbooks or feature variable files over the LAN, extracts the corresponding Ansible tags, and triggers a single master Ansible AWX Job Template (`site.yml`) so only the changed features run. This approach stops manual configuration drift, scales cleanly without manual CI/CD or AWX template updates, and keeps deployments secure with centralized TACACS+ authentication and custom Execution Environments.
 
 > **Note:** This project is built from scratch for learning purposes to explore how each tool and workflow step fits together, and is not intended for direct production use. Hopefully, it gives you a clear starting point for your own lab!
 
@@ -30,5 +30,6 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 7. [Deployed a local GitHub self-hosted runner on the AWX VM and configured GitHub Actions (CI/CD) to selectively trigger AWX Job Templates over LAN without ngrok](./SETUP.md#7-deploy-github-self-hosted-runner-and-configure-selective-github-actions-cicd) – **Completed**
 8. [Migrated inventories and device configurations to a modular Git-backed Source of Truth (`hosts.ini`, `group_vars`, and per-feature `host_vars` YAML files) with variable-driven playbooks and feature-level GitHub Actions triggers](./SETUP.md#8-migrate-to-modular-git-backed-source-of-truth) – **Completed**
 9. [Tested Juniper devices using the juniper.device collection and resolved legacy Cisco IOS SSH algorithm issues by baking a custom Execution Environment](./SETUP.md#9-multi-vendor-support-juniper-junos-and-custom-execution-environment) – **Completed**
-10. [Integrate LLDAP with TARANAC for lightweight directory-backed AAA authentication](./SETUP.md#10-integrate-lldap--taranac) – **In Progress**
-11. [Implement dynamic credentials (Just-in-time access) with HashiCorp Vault and AWX runtime secret lookup](./SETUP.md#11-dynamic-credentials-just-in-time-access-with-vault) – **In Progress**
+10. [Refactored playbooks into `playbooks/` with a root `site.yml` master dispatcher and dynamic tag-based GitHub Actions triggering for a single master AWX Job Template](./SETUP.md#10-refactor-to-master-siteyml-and-dynamic-tag-based-cicd) – **Completed**
+11. [Integrate LLDAP with TARANAC for lightweight directory-backed AAA authentication](./SETUP.md#11-integrate-lldap--taranac) – **In Progress**
+12. [Implement dynamic credentials (Just-in-time access) with HashiCorp Vault and AWX runtime secret lookup](./SETUP.md#12-dynamic-credentials-just-in-time-access-with-vault) – **In Progress**
