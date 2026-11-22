@@ -1,5 +1,7 @@
+# Workflow name displayed in the GitHub Actions tab
 name: Trigger AWX Selectively
 
+# Run this workflow whenever code is pushed to the main branch
 on:
   push:
     branches:
@@ -7,27 +9,33 @@ on:
 
 jobs:
   trigger:
+    # Use the local runner hosted on the AWX VM so we can reach AWX over LAN
     runs-on: self-hosted
+
     steps:
+      # Download the repository with the last 2 commits so git diff can compare HEAD vs HEAD~1
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
+      # Detect modified playbooks or variable files, extract matching tags, and trigger the master AWX template
       - name: Detect changed features and launch AWX
         env:
           AWX_URL: ${{ secrets.AWX_BASE_URL }}
           AWX_TOKEN: ${{ secrets.AWX_API_TOKEN }}
-          TEMPLATE_ID: 17
+          TEMPLATE_ID: 17 # Master-Network-Deploy (site.yml) Job Template ID
         run: |
-          # Extract unique filenames (without .yml) from playbooks/ or inventory/host_vars/<device>/
+          # Compare the latest commit against the previous one and extract unique feature names as Ansible tags
+          # Watches: playbooks/, inventory/host_vars/<device>/, and inventory/group_vars/all/
           TAGS=$(git diff --name-only HEAD~1 HEAD \
-            | grep -E '^(playbooks/|inventory/host_vars/[^/]+/).*\.yml$' \
+            | grep -E '^(playbooks/|inventory/host_vars/[^/]+/|inventory/group_vars/all/).*\.yml$' \
             | xargs -r -n1 basename \
             | sed 's/\.yml$//' \
             | sort -u \
             | paste -sd, -)
 
+          # Only call the AWX API if at least one network playbook or variable file changed
           if [ -n "$TAGS" ]; then
             echo "Detected feature changes. Launching Template $TEMPLATE_ID with tags: $TAGS"
             curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/$TEMPLATE_ID/launch/" \
@@ -35,5 +43,6 @@ jobs:
               -H "Content-Type: application/json" \
               -d "{\"job_tags\": \"$TAGS\"}"
           else
-            echo "No playbook or host_vars changes detected. Skipping AWX."
+            # Skip AWX cleanly for docs or unrelated repo changes
+            echo "No playbook, host_vars, or global group_vars changes detected. Skipping AWX."
           fi
