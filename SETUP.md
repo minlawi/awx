@@ -135,3 +135,61 @@ kubectl get secret awx-demo-admin-password -n awx -o jsonpath="{.data.password}"
 > [← Back to Project Overview](./README.md)
 
 ## 2. GitHub SSH Authentication & AWX Project Sync
+
+### 2.1 Generate an SSH Key Pair on the AWX Server
+Generate a dedicated `ed25519` SSH key pair without a passphrase so AWX can pull from GitHub automatically:
+
+```bash
+ssh-keygen -t ed25519 -C "awx-github-deploy" -f ~/.ssh/awx_github_key -N ""
+```
+
+Display and copy the **public key** (`awx_github_key.pub`) and **private key** (`awx_github_key`):
+
+```bash
+# Public key (paste into GitHub)
+cat ~/.ssh/awx_github_key.pub
+
+# Private key (paste into AWX)
+cat ~/.ssh/awx_github_key
+```
+
+---
+
+### 2.2 Add the Public Key to GitHub (Deploy Key)
+1. Open your private repository on **GitHub** and navigate to **Settings** → **Deploy keys** → **Add deploy key**.
+2. Enter a title (e.g., `AWX Server Read-Only`).
+3. Paste the contents of `~/.ssh/awx_github_key.pub` into the **Key** field.
+4. Leave **Allow write access** unchecked (AWX only needs read access to pull playbooks and inventory).
+5. Click **Add key**.
+
+*(Optional)* Verify SSH connectivity from the AWX server:
+```bash
+ssh -i ~/.ssh/awx_github_key -T git@github.com
+# Expected output: Hi <username>/<repo>! You've successfully authenticated, but GitHub does not provide shell access.
+```
+
+---
+
+### 2.3 Create a Source Control Credential in AWX
+1. Log in to the **AWX Web UI** (`http://<your-server-ip>:32000`).
+2. Go to **Resources** → **Credentials** → **Add**.
+3. Fill in the credential details:
+   * **Name:** `GitHub SSH Key`
+   * **Credential Type:** `Source Control`
+   * **SCM Private Key:** Paste the full contents of `~/.ssh/awx_github_key` (including `-----BEGIN OPENSSH PRIVATE KEY-----` and `-----END OPENSSH PRIVATE KEY-----`).
+4. Click **Save**.
+
+---
+
+### 2.4 Link the GitHub Repository as an AWX Project
+1. Go to **Resources** → **Projects** → **Add**.
+2. Configure the project settings:
+   * **Name:** `Projet Name`
+   * **Source Control Type:** `Git`
+   * **Source Control URL:** `git@github.com:<your-username>/<your-private-repo>.git`
+   * **Source Control Branch/Tag/Commit:** `main`
+   * **Source Control Credential:** Select `GitHub SSH Key`
+   * **Options:** Check **Update Revision on Launch** *(ensures AWX always pulls the latest commit from GitHub before running any Job Template)*
+3. Click **Save**.
+
+**Verification:** AWX immediately starts a Project Sync job. Confirm the **Status** changes to **Successful** (green) under **Views** → **Jobs**.
