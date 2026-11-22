@@ -494,3 +494,85 @@ Now that direct SSH login against TARANAC is working, we replace the local route
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 6. Configure GitHub Webhooks with ngrok HTTPS Tunnel
+
+In this phase, we move from manual job execution to event-driven automation. Because AWX runs on a private LAN IP (`http://<your-server-ip>:32000`), GitHub's cloud webhook servers cannot reach it directly. We use **ngrok** to create a temporary public HTTPS tunnel to AWX and wire up a GitHub Webhook so every `git push` automatically triggers the AWX Job Template.
+
+---
+
+### 6.1 Install and Start `ngrok` on the AWX VM
+1. Create a free account at [ngrok.com](https://ngrok.com/) and copy your **Authtoken** from the dashboard.
+2. Install `ngrok` on your Ubuntu AWX VM and configure your token:
+   ```bash
+   wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+   ```
+   ```bash
+   sudo tar xvzf ./ngrok-v3-stable-linux-amd64.tgz -C /usr/local/bin
+   ```
+   ```bash
+   ngrok config add-authtoken <NGROK_AUTHTOKEN>
+   ```
+3. Start an HTTPS tunnel forwarding to AWX's NodePort (`32000`):
+
+   ```bash
+   ngrok http 32000
+   ```
+
+*Verification:* Copy the **Forwarding** HTTPS URL displayed in the terminal (e.g., `https://<random-id>.ngrok-free.app`) and open it in a browser to confirm the AWX login page loads.
+
+---
+
+### 6.2 Enable GitHub Webhooks on the AWX Job Template
+1. Open the **AWX Web UI using your `ngrok` HTTPS URL** (`https://<random-id>.ngrok-free.app`) instead of your private LAN IP. *(Accessing AWX through the `ngrok` link ensures AWX automatically generates the **Webhook URL** with your public `ngrok` domain.)*
+2. Navigate to **Resources** → **Templates**.
+3. Open your Job Template (e.g., `Set Hostname (TACACS+ Auth)`) and click **Edit**.
+4. Under **Options**, check **Enable Webhook**.
+5. Set **Webhook Service** to `GitHub`.
+6. *(Optional)* Leave **Webhook Credential** blank unless you want AWX to post commit status checks back to GitHub.
+7. Click **Save**.
+8. On the template's **Details** tab, copy both generated values:
+   * **Webhook URL** *(e.g., `https://<random-id>.ngrok-free.app/api/v2/job_templates/<id>/github/`)*
+   * **Webhook Key** *(the secret token used to sign webhook payloads)*
+
+*Verification:* Confirm the **Webhook URL** starts with `https://<random-id>.ngrok-free.app` and that both **Webhook URL** and **Webhook Key** are visible on the Job Template's **Details** tab.
+
+---
+
+### 6.3 Add the Webhook in Your GitHub Repository
+1. Open your GitHub repository and navigate to **Settings** → **Webhooks** → **Add webhook**.
+2. Configure the webhook fields:
+   * **Payload URL:** Replace the private AWX host/port in AWX's Webhook URL with your `ngrok` HTTPS URL:
+     ```text
+     https://<random-id>.ngrok-free.app/api/v2/job_templates/<id>/github/
+     ```
+   * **Content type:** `application/json`
+   * **Secret:** Paste the **Webhook Key** copied from AWX.
+   * **SSL verification:** `Enable SSL verification`
+   * **Which events would you like to trigger this webhook?** Select `Just the push event`.
+   * Ensure **Active** is checked.
+3. Click **Add webhook**.
+
+*Verification:* Click on the newly created webhook, open the **Recent Deliveries** tab, and confirm the initial `ping` event shows a green checkmark (`200 OK` or `202 Accepted`).
+
+---
+
+### 6.4 Test Automatic Triggering on `git push`
+Make a quick change to `set_hostname.yml` (such as updating the target hostname) and push it to `main`:
+
+```bash
+git add set_hostname.yml
+git commit -m "test: trigger AWX Job Template via GitHub Webhook and ngrok"
+git push origin main
+```
+
+*Verification:*
+1. **GitHub Webhooks → Recent Deliveries:** Shows a green `202 Accepted` response for the `push` event.
+2. **ngrok Terminal:** Logs `POST /api/v2/job_templates/<id>/github/ 202 Accepted`.
+3. **AWX Web UI → Views → Jobs:** The Job Template launches automatically without manual intervention, completes with status **Successful**, and updates `R1`'s hostname to `R1-WEBHOOK-TEST`.
+
+> **Limitation Noted for Next Phases:** Free `ngrok` URLs rotate on every restart, and standard GitHub Webhooks fire on *every* push—triggering all linked templates regardless of which file changed. In **Tasks 7 & 8**, we resolve both issues using **GitHub Actions** and a **local Self-Hosted Runner**.
+
+---
+
+> [← Back to Project Overview](./README.md)
