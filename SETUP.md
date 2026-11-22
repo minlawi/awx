@@ -702,3 +702,206 @@ git push origin main
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 8. Migrate to Modular Git-Backed Source of Truth
+
+Instead of managing hosts manually inside the AWX UI and hardcoding device settings inside playbooks, we move all inventory and device configuration data into Git (`hosts.ini`, `group_vars`, and `host_vars`). Playbooks become reusable templates, AWX syncs its inventory directly from GitHub, and GitHub Actions triggers only the Job Template whose playbook or variable file changed.
+
+---
+
+### 8.1 Create the Modular Source of Truth Directory Structure
+Organize your repository so connection parameters live in `group_vars` and device-specific configurations live in per-feature YAML files under `host_vars/<device>/`:
+
+Create the files locally:
+
+```bash
+mkdir -p inventory/group_vars inventory/host_vars/CR1
+
+# 1. Define the inventory hosts and groups
+cat << 'EOF' > inventory/hosts.ini
+[cisco_routers]
+CR1 ansible_host=192.168.50.186
+EOF
+
+# 2. Define shared Cisco IOS connection variables
+cat << 'EOF' > inventory/group_vars/cisco_routers.yml
+---
+ansible_network_os: cisco.ios.ios
+ansible_connection: ansible.netcommon.network_cli
+EOF
+
+# 3. Define device-specific hostname variable
+cat << 'EOF' > inventory/host_vars/R1/hostname.yml
+---
+router_hostname: R1-SOT-PROD
+EOF
+
+# 4. Define device-specific loopback interface variables
+cat << 'EOF' > inventory/host_vars/R1/loopback_interfaces.yml
+---
+loopback_interfaces:
+  - name: Loopback0
+    description: Managed by Ansible SOT
+    ipv4: 10.100.100.1 255.255.255.255
+EOF
+```
+
+*Verification:* Run `tree inventory/` (or `find inventory/`) and confirm all four files are in place.
+
+---
+
+### 8.2 Refactor Playbooks to Be Dynamic and Variable-Driven
+Update `set_hostname.yml` and `create_loopback.yml` so they pull values dynamically from `host_vars` rather than hardcoding them:
+
+```bash
+cat << 'EOF' > set_hostname.yml
+---
+- name: Configure Cisco IOS Hostname from Source of Truth
+  hosts: cisco_routers
+  gather_facts: false
+
+  tasks:
+    - name: Merge hostname configuration on the router
+      cisco.ios.ios_hostname:
+        config:
+          hostname: "{{ router_hostname }}"
+        state: merged
+EOF
+
+cat << 'EOF' > create_loopback.yml
+---
+- name: Configure Cisco IOS Loopback Interfaces from Source of Truth
+  hosts: cisco_routers
+  gather_facts: false
+
+  tasks:
+    - name: Configure loopback interface description and state
+      cisco.ios.ios_interfaces:
+        config:
+          - name: "{{ item.name }}"
+            description: "{{ item.description }}"
+            enabled: true
+        state: merged
+      loop: "{{ loopback_interfaces }}"
+
+    - name: Configure loopback IPv4 address
+      cisco.ios.ios_l3_interfaces:
+        config:
+          - name: "{{ item.name }}"
+            ipv4:
+              - address: "{{ item.ipv4 }}"
+        state: merged
+      loop: "{{ loopback_interfaces }}"
+EOF
+```
+
+---
+
+### 8.3 Configure a Git-Backed Inventory Source in AWX
+Replace the manually created hosts in AWX with a dynamic inventory sourced directly from your GitHub repository:
+
+1. Open the **AWX Web UI** (`http://<your-server-ip>:32000`) and go to **Resources** → **Inventories** → **Add** → **Add inventory**.
+   * **Name:** `Git-SOT-Inventory`
+   * Click **Save**.
+2. Open the **Sources** tab inside `Git-SOT-Inventory` and click **Add**:
+   * **Name:** `GitHub-Hosts-INI`
+   * **Source:** `Sourced from a Project`
+   * **Project:** `Network-Automation-SOT`
+   * **Inventory file:** `inventory/hosts.ini`
+   * **Update options:** Check **Overwrite**, **Overwrite variables**, and **Update on launch**.
+   * Click **Save**, then click **Sync**.
+3. Update both Job Templates (`set_hostname.yml` — Template `12`, and `create_loopback.yml` — Template `13`) to use `Git-SOT-Inventory` as their **Inventory**.
+
+*Verification:* Open `Git-SOT-Inventory` → **Groups** → `cisco_routers` → **Hosts** and confirm `R1` is synced automatically with its `group_vars` and `host_vars` loaded.
+
+---
+
+### 8.4 Update GitHub Actions for Variable-Aware Selective Triggering
+Update `.github/workflows/trigger-awx.yml` so each matrix entry maps a playbook **and** its corresponding `host_vars` filename to an AWX Job Template ID. When a commit modifies either the playbook or its matching variable file inside `host_vars/<device>/`, only that Job Template launches.
+
+> **Note:** This CI workflow code was generated using **Gemini – Neon Model**.
+
+```bash
+cat << 'EOF' > .github/workflows/trigger-awx.yml
+# Workflow name displayed in the GitHub Actions tab
+name: Trigger AWX Selectively
+
+# Run this workflow whenever code is pushed to the main branch
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  trigger:
+    # Use the local runner hosted on the AWX VM so we can reach AWX over LAN
+    runs-on: self-hosted
+
+    strategy:
+      # Continue checking other templates even if one fails
+      fail-fast: false
+      # Map each playbook and its corresponding host_vars filename to an AWX Job Template ID
+      matrix:
+        include:
+          - playbook: set_hostname.yml
+            var_file: hostname.yml
+            template_id: 12 # Replace with your actual template_id
+          - playbook: create_loopback.yml
+            var_file: loopback_interfaces.yml
+            template_id: 13 # Replace with your actual template_id
+
+    steps:
+      # Download the repository with the last 2 commits so git diff can compare HEAD vs HEAD~1
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # Check if the playbook or its matching variable file changed, then trigger AWX via API
+      - name: Check changes and launch AWX
+        env:
+          AWX_URL: ${{ secrets.AWX_BASE_URL }}
+          AWX_TOKEN: ${{ secrets.AWX_API_TOKEN }}
+        run: |
+          # Get the list of files modified in the latest commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+
+          # Match either the playbook at repo root or its variable file inside host_vars/<device>/
+          if echo "$CHANGED_FILES" | grep -qE "(^${{ matrix.playbook }}$|/${{ matrix.var_file }}$)"; then
+            echo "Launching Template ID ${{ matrix.template_id }}..."
+            curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/${{ matrix.template_id }}/launch/" \
+              -H "Authorization: Bearer $AWX_TOKEN" \
+              -H "Content-Type: application/json"
+          else
+            echo "Skipping ${{ matrix.playbook }} - no changes."
+          fi
+EOF
+```
+
+Commit and push all changes:
+```bash
+git add inventory/ set_hostname.yml create_loopback.yml .github/workflows/trigger-awx.yml
+git commit -m "feat: migrate to modular Git-backed SOT with variable-aware AWX triggers"
+git push origin main
+```
+
+---
+
+### 8.5 Verify Variable-Driven Selective Automation
+Test that editing a single Source of Truth file triggers only its matching AWX Job Template:
+
+```bash
+git add inventory/host_vars/R1/hostname.yml
+git commit -m "change(R1): update hostname in Source of Truth"
+git push origin main
+```
+
+*Verification:*
+1. **GitHub → Actions (`Trigger AWX Selectively`):**
+   * `set_hostname.yml` logs `Launching Template ID 12...`
+   * `create_loopback.yml` logs `Skipping create_loopback.yml - no changes.`
+2. **AWX Web UI → Views → Jobs:** `Git-SOT-Inventory` syncs automatically, Template `12` completes with status **Successful**, and `show running-config | include hostname` on `R1` confirms `hostname R1-SOT-VERIFIED`.
+
+---
+
+> [← Back to Project Overview](./README.md)
