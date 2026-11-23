@@ -1344,3 +1344,193 @@ For settings shared across every router (such as NTP, Syslog, or login banners),
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 11. Integrate LLDAP with TARANAC for Directory-Backed AAA
+
+Instead of managing static local users inside TARANAC, we deploy **LLDAP** (Lightweight LDAP) as a lightweight pod on the existing AWX K3s cluster, connect TARANAC to it over LDAP, and authenticate both direct router SSH logins and Ansible AWX jobs against centralized directory accounts.
+
+---
+
+### 11.1 Deploy LLDAP on the AWX K3s Cluster
+Running LLDAP on the AWX K3s cluster (~20 MB RAM, <100 MB disk) avoids installing Docker on EVE-NG and prevents `iptables` `FORWARD` chain conflicts with `pnet0`.
+
+```bash
+mkdir -p ~/lldap-k3s && cd ~/lldap-k3s
+
+cat << 'EOF' > lldap.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lldap
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lldap-data
+  namespace: lldap
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lldap
+  namespace: lldap
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lldap
+  template:
+    metadata:
+      labels:
+        app: lldap
+    spec:
+      containers:
+        - name: lldap
+          image: lldap/lldap:stable
+          ports:
+            - containerPort: 3890
+              name: ldap
+            - containerPort: 17170
+              name: http
+          env:
+            - name: TZ
+              value: "Asia/Singapore"
+            - name: LLDAP_JWT_SECRET
+              value: "replace_with_random_32char_secret_1"
+            - name: LLDAP_KEY_SEED
+              value: "replace_with_random_32char_secret_2"
+            - name: LLDAP_LDAP_BASE_DN
+              value: "dc=lab,dc=local"
+            - name: LLDAP_LDAP_USER_PASS
+              value: "P@ssw0rd123"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: lldap-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lldap
+  namespace: lldap
+spec:
+  type: NodePort
+  selector:
+    app: lldap
+  ports:
+    - name: ldap
+      port: 3890
+      targetPort: 3890
+      nodePort: 30389
+    - name: http
+      port: 17170
+      targetPort: 17170
+      nodePort: 31717
+EOF
+
+kubectl apply -f lldap.yaml
+```
+
+*Verification:* Run `kubectl get pods,svc -n lldap` and confirm the `lldap` pod shows `1/1 Running` and exposes NodePorts `30389` (LDAP) and `31717` (Web UI).
+
+---
+
+### 11.2 Create Directory Groups and Accounts in LLDAP
+Open the LLDAP Web UI at `http://<AWX_VM_IP>:31717` and log in with `admin` / `P@ssw0rd123`:
+
+1. **Create the `netadmins` Group:**
+   * Go to **Groups** → **Create a group** → Name: `netadmins` → **Submit**.
+2. **Create a Least-Privilege Bind Account (for TARANAC only):**
+   * Go to **Users** → **Create a user** → User ID: `taranac_bind`, Email: `taranac_bind@lab.local`, Password: `<bind-password>`.
+   * Open `taranac_bind` and add it to the built-in **`lldap_strict_readonly`** group *(grants read-only directory search access without write privileges or router login rights)*.
+3. **Create the Directory Network User (for SSH & AWX):**
+   * Go to **Users** → **Create a user** → User ID: `awx_ldap_admin`, Email: `awx_ldap_admin@lab.local`, Password: `<ldap-user-password>`.
+   * Open `awx_ldap_admin` and add it to the **`netadmins`** group.
+
+*Verification:* Under **Groups** → `netadmins`, confirm `awx_ldap_admin` is listed; under `lldap_strict_readonly`, confirm `taranac_bind` is listed.
+
+---
+
+### 11.3 Validate LDAP Connectivity from the CLI
+Before configuring TARANAC, verify that `taranac_bind` can authenticate and query `awx_ldap_admin` over NodePort `30389` (use `-W` to prompt interactively so Bash does not expand special characters in the password):
+
+```bash
+sudo apt install -y ldap-utils
+
+ldapsearch -x -H ldap://<AWX_VM_IP>:30389 \
+  -D "uid=taranac_bind,ou=people,dc=lab,dc=local" \
+  -W \
+  -b "dc=lab,dc=local" "(uid=awx_ldap_admin)"
+```
+
+*Verification:* Returns `dn: uid=awx_ldap_admin,ou=people,dc=lab,dc=local` and ends with `result: 0 Success`.
+
+---
+
+### 11.4 Configure LLDAP Integration in TARANAC
+Open the **TARANAC Web UI** → **Settings** → **LDAP** → **New LDAP Configuration** → select **OpenLDAP** *(LLDAP uses the standard OpenLDAP schema: `posixAccount`/`uid` for users and `groupOfNames`/`cn`/`member` for groups)*.
+
+1. **Connection & Search:**
+   * **Config ID / Display Name:** `lldap-lab` / `LLDAP Lab`
+   * **Domain Suffix:** `lab.local`
+   * **Server URIs:** `ldap://<AWX_VM_IP>:30389`
+   * **Bind DN:** `uid=taranac_bind,ou=people,dc=lab,dc=local`
+   * **Bind Password:** `<bind-password>`
+   * **STARTTLS / Validate TLS:** Both **OFF** *(plain `ldap://`)*
+   * **Search Bases:** Add `dc=lab,dc=local`
+   * **User / Group Search Filters:** Leave OpenLDAP defaults (`(&(objectClass=posixAccount)(uid={username}))` and `(objectClass=groupOfNames)`)
+
+2. **Synchronization & Attribute Mapping:**
+   * **Enable Auto Sync:** Toggle **ON**
+   * **Mode:** `Groups → Users`
+   * **Create users:** **ON**
+   * **User Lifecycle Cleanup:** Toggle **ON** either **Deactivate missing users** *(recommended—disables access while preserving audit/MFA history)* or **Remove stale users** *(hard-deletes the user from TARANAC when removed from LLDAP)*
+   * **Attribute Mapping:** Leave all defaults (`uid`, `mail`, `cn`, `member`) unchanged
+
+3. **Selective Group Sync:**
+   * Add `cn=netadmins,ou=groups,dc=lab,dc=local` *(note lowercase `ou=groups`)* so only `netadmins` and its members are imported.
+   * Click **Create Config**.
+
+4. **Run Initial Sync:**
+   * Click **Test Connection** and **Sync Now** on `LLDAP Lab`.
+   * *Verification:* **Sync History** shows `completed`, and both `netadmins` (under **Identity → Groups**) and `awx_ldap_admin` (under **Identity → Users**) appear in TARANAC.
+
+---
+
+### 11.5 Map `netadmins` to the TARANAC AAA Policy
+1. Go to **AAA** → **Policies** → **Policy Table**.
+2. Edit your existing Cisco/Juniper policy rule (or add a new one) to include the synced LDAP group **`netadmins`** under **Who → Groups**, mapped to **TACACS+ Profile:** `General Full Access (priv 15)`.
+3. Save and deploy any pending changes.
+
+*Verification:* The rule shows **Enabled** in the Policy Table with no pending deployments on the dashboard.
+
+---
+
+### 11.6 End-to-End Verification (SSH, AWX & User Offboarding)
+1. **Direct SSH Test:**
+   ```bash
+   ssh awx_ldap_admin@192.168.50.186
+   ```
+   *Verification:* You land directly on `CR1#` (`show privilege` returns `15`), and **TARANAC → LOGGING & REPORTS → AAA Logs** records a **PASS** entry for `awx_ldap_admin`.
+
+2. **AWX Job Test:**
+   * In AWX (**Resources** → **Credentials**), update your TACACS+ Machine Credential (or create `LDAP TACACS+ Credentials`) with `awx_ldap_admin` and `<ldap-user-password>`, then attach it to `Master-Network-Deploy`.
+   * Launch `Master-Network-Deploy` with **Job Tags:** `ntp`.
+   * *Verification:* The job completes with status **Successful** across `CR1`, `CR2`, and `JR1`, and TARANAC logs the configuration session under `awx_ldap_admin`.
+
+3. **User Offboarding Test (Optional):**
+   * Delete a test user in LLDAP and click **Sync Now** in TARANAC.
+   * *Verification:* The user is removed from `netadmins` and deactivated or deleted in TARANAC according to your Step 11.4 lifecycle setting, immediately revoking router SSH access.
+
+---
+
+> [← Back to Project Overview](./README.md)
