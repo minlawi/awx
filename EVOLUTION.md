@@ -8,17 +8,17 @@ This document traces how each milestone enhanced the previous stage, highlightin
 
 | Progression | Key Enhancement | Day 2 Pain Point Solved | Security Impact |
 | :--- | :--- | :--- | :--- |
-| **Task 2 → Task 1** | GitHub SSH Deploy Key + Auto-Sync | Manual playbook transfers & stale runs | Read-only repo-scoped `ed25519` key (no personal credentials) |
-| **Task 3 → Task 2** | Live Cisco Playbook Run + Custom EE | Validated end-to-end device push & legacy SSH KEX | Exposed local credential sprawl & lack of audit trail |
-| **Task 4 → Task 3** | TARANAC (TACACS+) Direct SSH AAA | Per-device local password management | Centralized AuthN/AuthZ/Accounting with local fallback |
-| **Task 5 → Task 4** | AWX Jobs via TACACS+ Credentials | Split human vs. automation AAA paths | Full command-level auditing of Ansible changes in TARANAC |
-| **Task 6 → Task 5** | GitHub Webhooks + `ngrok` Tunnel | Manual AWX Job Template launches | Introduced public internet exposure to private AWX control plane |
-| **Task 7 → Task 6** | Self-Hosted Runner + Selective Actions | Rotating `ngrok` URLs & noisy full-repo triggers | Eliminated inbound exposure; LAN-only API calls via GitHub Secrets |
-| **Task 8 → Task 7** | Modular Git-Backed Source of Truth | Manual AWX inventory edits & hardcoded playbooks | Git-versioned configs, PR review gates, and `git revert` rollback |
-| **Task 9 → Task 8** | Juniper Junos (NETCONF) + Multi-Vendor EE | Vendor-specific toolchains & legacy collections | Hardened local container (`Pull: Never`), eliminating runtime pulls |
-| **Task 10 → Task 9** | Master `site.yml` + Dynamic Tag CI/CD | Manually adding new AWX templates & editing CI for every new feature | Only changed features run (lower risk of breaking other configs) from one master AWX template |
-| **Task 11 → Task 10** | LLDAP Directory + TARANAC Sync | Managing local user accounts manually inside TARANAC | Read-only `taranac_bind` account & centralized access revocation via `netadmins` group sync |
-| **Task 12 → Task 11** | HashiCorp Vault Dynamic Credentials | Manual credential rotation inside AWX | Eliminates long-lived static secrets via Just-in-Time runtime lookup |
+| **Task&nbsp;2&nbsp;→&nbsp;Task&nbsp;1** | GitHub SSH Deploy Key + Auto-Sync | Manual playbook transfers & stale runs | Read-only repo-scoped `ed25519` key (no personal credentials) |
+| **Task&nbsp;3&nbsp;→&nbsp;Task&nbsp;2** | Live Cisco Playbook Run + Custom EE | Validated end-to-end device push & legacy SSH KEX | Exposed local credential sprawl & lack of audit trail |
+| **Task&nbsp;4&nbsp;→&nbsp;Task&nbsp;3** | TARANAC (TACACS+) Direct SSH AAA | Per-device local password management | Centralized AuthN/AuthZ/Accounting with local fallback |
+| **Task&nbsp;5&nbsp;→&nbsp;Task&nbsp;4** | AWX Jobs via TACACS+ Credentials | Split human vs. automation AAA paths | Full command-level auditing of Ansible changes in TARANAC |
+| **Task&nbsp;6&nbsp;→&nbsp;Task&nbsp;5** | GitHub Webhooks + `ngrok` Tunnel | Manual AWX Job Template launches | Introduced public internet exposure to private AWX control plane |
+| **Task&nbsp;7&nbsp;→&nbsp;Task&nbsp;6** | Self-Hosted Runner + Selective Actions | Rotating `ngrok` URLs & noisy full-repo triggers | Eliminated inbound exposure; LAN-only API calls via GitHub Secrets |
+| **Task&nbsp;8&nbsp;→&nbsp;Task&nbsp;7** | Modular Git-Backed Source of Truth | Manual AWX inventory edits & hardcoded playbooks | Git-versioned configs, PR review gates, and `git revert` rollback |
+| **Task&nbsp;9&nbsp;→&nbsp;Task&nbsp;8** | Juniper Junos (NETCONF) + Multi-Vendor EE | Vendor-specific toolchains & legacy collections | Hardened local container (`Pull: Never`), eliminating runtime pulls |
+| **Task&nbsp;10&nbsp;→&nbsp;Task&nbsp;9** | Master `site.yml` + Dynamic Tag CI/CD | Manually adding new AWX templates & editing CI for every new feature | Only changed features run (lower risk of breaking other configs) from one master AWX template |
+| **Task&nbsp;11&nbsp;→&nbsp;Task&nbsp;10** | LLDAP Directory + TARANAC Sync | Managing local user accounts manually inside TARANAC | Read-only `taranac_bind` account & centralized access revocation via `netadmins` group sync |
+| **Task&nbsp;12&nbsp;→&nbsp;Task&nbsp;11** | HashiCorp Vault Dynamic Credentials | Manual credential rotation inside AWX | Eliminates long-lived static secrets via Just-in-Time runtime lookup |
 
 ---
 
