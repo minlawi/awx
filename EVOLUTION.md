@@ -18,7 +18,7 @@ This document traces how each milestone enhanced the previous stage, highlightin
 | **Task&nbsp;9&nbsp;→&nbsp;Task&nbsp;8** | Juniper Junos (NETCONF) + Multi-Vendor EE | Vendor-specific toolchains & legacy collections | Hardened local container (`Pull: Never`), eliminating runtime pulls |
 | **Task&nbsp;10&nbsp;→&nbsp;Task&nbsp;9** | Master `site.yml` + Dynamic Tag CI/CD | Manually adding new AWX templates & editing CI for every new feature | Only changed features run (lower risk of breaking other configs) from one master AWX template |
 | **Task&nbsp;11&nbsp;→&nbsp;Task&nbsp;10** | LLDAP Directory + TARANAC Sync | Managing local user accounts manually inside TARANAC | Read-only `taranac_bind` account & centralized access revocation via `netadmins` group sync |
-| **Task&nbsp;12&nbsp;→&nbsp;Task&nbsp;11** | HashiCorp Vault Dynamic Credentials | Manual credential rotation inside AWX | Eliminates long-lived static secrets via Just-in-Time runtime lookup |
+| **Task&nbsp;12&nbsp;→&nbsp;Task&nbsp;11** | HashiCorp Vault LDAP Rotation + AWX Lookup | Manual password rotation & updating static secrets in AWX | Automated 24h LLDAP rotation (`ldap_ansible`), zero static passwords in AWX, AppRole JIT lookup & real-time Vault audit logs |
 
 ---
 
@@ -75,13 +75,19 @@ This document traces how each milestone enhanced the previous stage, highlightin
   * Uses a least-privilege read-only bind account (`taranac_bind` in `lldap_strict_readonly`) with zero write rights and no router access.
   * **Selective Group Sync** imports only `netadmins`, keeping LLDAP internal admin groups isolated from TARANAC.
   * Automated offboarding immediately revokes router access when an account is removed from LLDAP.
-* **Remaining Gaps (Addressed in Task 12 & Future Hardening):**
-  * AWX still stores a static password for `awx_ldap_admin`.
-  * Lab LDAP currently uses plain `ldap://` (`30389`) and should be upgraded to `ldaps://` (TLS) for production environments.
+* **Remaining Gaps:**
+  * AWX still stores a static password for its LDAP service account *(Addressed in Task 12)*.
+  * Lab LDAP uses plain `ldap://` (`30389`) instead of `ldaps://` *(Future Production Hardening)*.
 
-### Task 12 (Enhances Task 11 — Upcoming): HashiCorp Vault & Dynamic Credentials
-* **Day 2 Pain Point Solved:** Eliminates manual secret updates in AWX whenever credentials rotate and centralizes all automation secrets in a dedicated secrets engine.
-* **Security Improvement:** Removes standing static passwords from the AWX database in favor of **Just-in-Time (JIT)** runtime secret lookups with centralized lease management and access auditing in Vault.
+### Task 12 (Enhances Task 11): HashiCorp Vault Automated Credential Rotation & Runtime Lookup
+* **Day 2 Pain Point Solved:** Eliminates manual password rotation and removes static passwords from AWX completely. Vault's **LDAP Secrets Engine** (`ldap/static-role/ldap-ansible-role`) automatically rotates the `ldap_ansible` password in LLDAP every 24 hours using a router-safe `network-cli` password policy, while AWX fetches the current password dynamically at job runtime. A native host Vault CLI (`VAULT_ADDR` in `/etc/profile.d/vault.sh`) and a lab auto-unseal cron job keep Vault operational across VM reboots without manual `kubectl exec` commands.
+* **Security Improvement:**
+  * **Zero Static Passwords in AWX:** AWX never stores the `ldap_ansible` password in its database; it authenticates via a scoped **AppRole** (`awx-ldap-read` policy, restricted solely to `read` on `ldap/static-cred/ldap-ansible-role`) using **HashiCorp Vault Secret Lookup** (`API Version: v1`).
+  * **Separation of Duties:** `vault_bind` (member of `lldap_password_manager`) is dedicated to password rotation and has no router login rights, while `ldap_ansible` (member of `netadmins`) handles router automation and has no directory admin rights.
+  * **End-to-End Auditability:** Real-time Vault audit logging (`file_path=stdout`) records every `auth/approle/login`, `ldap/static-cred/ldap-ansible-role` read, and `ldap/rotate-role/ldap-ansible-role` rotation, correlating directly with TARANAC's AAA command accounting logs.
+* **Remaining Gaps (Future Production Hardening):**
+  * **Transport Security:** Lab Vault (`http://:30820`) and LLDAP (`ldap://:30389`) run over plaintext on the private LAN; production environments should enforce TLS (`https://` and `ldaps://`) with trusted CA certificates.
+  * **Auto-Unseal Mechanism:** Storing the unseal key in a root-only host file (`/root/.vault-unseal-key`) for cron auto-unseal is a lab-only convenience; production clusters should use Cloud KMS or Vault Transit Auto-Unseal.
 
 ---
 

@@ -1534,3 +1534,403 @@ Open the **TARANAC Web UI** → **Settings** → **LDAP** → **New LDAP Configu
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 12. Automated Credential Rotation and Runtime Lookup with HashiCorp Vault
+
+To eliminate static passwords inside AWX and automate credential rotation, we pre-configure dedicated service accounts in **LLDAP**, deploy **HashiCorp Vault** on K3s, configure its **LDAP Secrets Engine** to rotate the `ldap_ansible` service account every 24 hours, and wire AWX to fetch the live password at job runtime using an **AppRole** credential lookup.
+
+### How the Vault LDAP Rotation Chain Works
+1. **Secrets Engine (`ldap/`):** Mounts Vault's LDAP plugin.
+2. **Password Policy (`network-cli`):** Enforces router-CLI-safe characters so rotated passwords never break Cisco/Juniper SSH or TACACS+ authentication.
+3. **LDAP Connection Config (`ldap/config`):** Stores LLDAP's address (`:30389`), search base (`ou=people,dc=lab,dc=local`), the privileged `vault_bind` account, and references the `network-cli` policy.
+4. **Static Role (`ldap/static-role/ldap-ansible-role`):** Maps 1-to-1 to the existing `ldap_ansible` user with `rotation_period="24h"`. Every 24 hours (or on manual trigger), Vault binds to LLDAP as `vault_bind`, updates `ldap_ansible`'s password, and serves the live secret to AWX at `ldap/static-cred/ldap-ansible-role`.
+
+---
+
+### 12.1 Pre-Configure LLDAP Service Accounts & Groups
+Before deploying Vault, create dedicated LLDAP service accounts for **Vault** and **AWX** to enforce strict separation of duties across directory management, TACACS+ sync, and router automation:
+
+| LLDAP Service Account | Assigned LLDAP Group | Purpose & Least-Privilege Scope |
+| :--- | :--- | :--- |
+| `taranac_bind` *(from Step 11.2)* | `lldap_strict_readonly` | Read-only directory search for TARANAC LDAP sync (no write rights, no router access) |
+| **`vault_bind`** *(new)* | **`lldap_password_manager`** | Privileged bind account for HashiCorp Vault to reset/rotate user passwords in LLDAP (no router login access, not synced to TARANAC) |
+| **`ldap_ansible`** *(new)* | **`netadmins`** | Managed automation account synced to TARANAC for AWX router SSH/NETCONF logins; password automatically rotated every 24h by Vault |
+
+Open the **LLDAP Web UI** (`http://<AWX_VM_IP>:31717`) and log in as `admin`:
+
+1. **Verify the `netadmins` Group Exists:**
+   * Go to **Groups** and confirm `netadmins` (created in Step 11.2) is present, alongside LLDAP's built-in **`lldap_password_manager`** group.
+2. **Create the Vault Bind Service Account (`vault_bind`):**
+   * Go to **Users** → **Create a user**:
+     * **User ID:** `vault_bind`
+     * **Email:** `vault_bind@lab.local`
+     * **Password:** `<vault-bind-password>` *(use a strong static password; Vault stores this encrypted inside `ldap/config`)*
+     * Click **Submit**.
+   * Open the `vault_bind` user profile → under **Group memberships**, add **`lldap_password_manager`**. *(Do **not** add `vault_bind` to `netadmins`.)*
+3. **Create the AWX Automation Service Account (`ldap_ansible`):**
+   * Go to **Users** → **Create a user**:
+     * **User ID:** `ldap_ansible`
+     * **Email:** `ldap_ansible@lab.local`
+     * **Password:** `<temporary-initial-password>` *(any temporary password—Vault will immediately rotate it once bound to the static role)*
+     * Click **Submit**.
+   * Open the `ldap_ansible` user profile → under **Group memberships**, add **`netadmins`**. *(Do **not** add `ldap_ansible` to any `lldap_*` admin groups.)*
+4. **Sync the New Automation Account into TARANAC:**
+   * Open the **TARANAC Web UI** → **Settings** → **LDAP** → **`LLDAP Lab`** and click **Sync Now**.
+   * Confirm **`ldap_ansible`** appears under **INFRASTRUCTURE → Identity → Users** as a member of **`netadmins`**, while **`vault_bind`** is excluded by Selective Group Sync (`cn=netadmins,ou=groups,dc=lab,dc=local`).
+5. **Validate `vault_bind` Authentication & Lookup from CLI:**
+   ```bash
+   ldapsearch -x -H ldap://<AWX_VM_IP>:30389 \
+     -D "uid=vault_bind,ou=people,dc=lab,dc=local" \
+     -W \
+     -b "ou=people,dc=lab,dc=local" "(uid=ldap_ansible)"
+   ```
+
+*Verification:* `ldapsearch` returns `dn: uid=ldap_ansible,ou=people,dc=lab,dc=local` and ends with `result: 0 Success`, confirming `vault_bind` can authenticate to LLDAP and locate `ldap_ansible` before Vault is configured.
+
+---
+
+### 12.2 Deploy HashiCorp Vault on K3s
+Deploy Vault in a dedicated `vault` namespace using persistent `local-path` file storage, an init container for volume permissions, and NodePort `30820`:
+
+```bash
+mkdir -p ~/vault-k3s && cd ~/vault-k3s
+
+cat << 'EOF' > vault.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-data
+  namespace: vault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault.hcl: |
+    ui = true
+    disable_mlock = true
+
+    storage "file" {
+      path = "/vault/file"
+    }
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = 1
+    }
+
+    api_addr = "http://<AWX_VM_IP>:30820"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 100:1000 /vault/file"]
+          volumeMounts:
+            - name: vault-data
+              mountPath: /vault/file
+      containers:
+        - name: vault
+          image: hashicorp/vault:latest
+          args: ["server"]
+          ports:
+            - containerPort: 8200
+              name: http
+          env:
+            - name: VAULT_ADDR
+              value: "http://127.0.0.1:8200"
+          volumeMounts:
+            - name: vault-data
+              mountPath: /vault/file
+            - name: vault-config
+              mountPath: /vault/config
+      volumes:
+        - name: vault-data
+          persistentVolumeClaim:
+            claimName: vault-data
+        - name: vault-config
+          configMap:
+            name: vault-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  type: NodePort
+  selector:
+    app: vault
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+      nodePort: 30820
+EOF
+
+kubectl apply -f vault.yaml
+```
+
+*Verification:* Run `kubectl get pods,svc -n vault` and confirm the `vault` pod is `1/1 Running` and exposed on NodePort `30820`.
+
+---
+
+### 12.3 Install Native Vault CLI, Persist `VAULT_ADDR`, and Initialize Vault
+Install the native `vault` CLI on the Ubuntu host so you can manage Vault directly without wrapping every command in `kubectl exec`:
+
+```bash
+sudo apt-get update && sudo apt-get install -y gpg wget lsb-release
+
+wget -O- https://apt.releases.hashicorp.com/gpg | \
+  sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+  sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+sudo apt-get update && sudo apt-get install -y vault
+```
+
+Set `VAULT_ADDR` globally for all users (`lawi` and `root`):
+
+```bash
+echo 'export VAULT_ADDR="http://<AWX_VM_IP>:30820"' | sudo tee /etc/profile.d/vault.sh
+source /etc/profile.d/vault.sh
+```
+
+Initialize Vault (using 1 key share/threshold for home-lab simplicity), save the printed **Unseal Key** and **Initial Root Token**, then unseal and log in:
+
+```bash
+vault operator init -key-shares=1 -key-threshold=1
+vault operator unseal <UNSEAL_KEY>
+vault login <INITIAL_ROOT_TOKEN>
+```
+
+*Verification:* Run `vault status` and confirm `Initialized: true` and `Sealed: false`.
+
+---
+
+### 12.4 Configure Automatic Unseal for Lab Reboots (Root Cron Job)
+> **Lab-Only Caveat:** Storing the unseal key on the same VM is a convenience trade-off for a single-node home lab. Production deployments should use Cloud KMS or Vault Transit Auto-Unseal.
+
+1. **Store the unseal key in a root-only file:**
+   ```bash
+   echo '<UNSEAL_KEY>' | sudo tee /root/.vault-unseal-key > /dev/null
+   sudo chmod 600 /root/.vault-unseal-key
+   sudo chown root:root /root/.vault-unseal-key
+   ```
+
+2. **Create the auto-unseal script:**
+   ```bash
+   sudo tee /usr/local/bin/vault-autounseal.sh > /dev/null << 'EOF'
+   #!/usr/bin/env bash
+   set -euo pipefail
+
+   VAULT_URL="http://<AWX_VM_IP>:30820"
+   KEY_FILE="/root/.vault-unseal-key"
+
+   # Exit quietly if Vault is not up yet
+   STATUS=$(curl -s --max-time 3 "${VAULT_URL}/v1/sys/seal-status" || true)
+   [ -z "$STATUS" ] && exit 0
+
+   # Unseal only if Vault reports sealed=true
+   if echo "$STATUS" | grep -q '"sealed":true'; then
+     UNSEAL_KEY=$(cat "$KEY_FILE")
+     curl -s --max-time 5 -X PUT \
+       -d "{\"key\": \"${UNSEAL_KEY}\"}" \
+       "${VAULT_URL}/v1/sys/unseal" > /dev/null
+     logger -t vault-autounseal "Vault was sealed; auto-unseal triggered."
+   fi
+   EOF
+
+   sudo chmod 700 /usr/local/bin/vault-autounseal.sh
+   ```
+
+3. **Schedule the 1-minute root cron job:**
+   ```bash
+   (sudo crontab -l 2>/dev/null | grep -v 'vault-autounseal.sh'; echo '* * * * * /usr/local/bin/vault-autounseal.sh') | sudo crontab -
+   ```
+
+4. **Test auto-unseal live:**
+   ```bash
+   vault operator seal
+   vault status   # Confirm Sealed: true
+   sleep 65
+   vault status   # Confirm Sealed: false
+   grep vault-autounseal /var/log/syslog | tail -n 3
+   ```
+
+*Verification:* `vault status` returns `Sealed: false` within 60 seconds, and `/var/log/syslog` logs `Vault was sealed; auto-unseal triggered.`
+
+---
+
+### 12.5 Configure Vault LDAP Secrets Engine, Password Policy & Static Role
+Run the following four steps in order from your authenticated host shell:
+
+1. **Enable the LDAP Secrets Engine:**
+   ```bash
+   vault secrets enable ldap
+   ```
+
+2. **Create a Router-Safe Password Policy (`network-cli`):**
+   *(Avoids special characters such as `?`, quotes, or shell-breaking symbols that can disrupt Cisco IOS/Juniper Junos CLI or TACACS+ parsing.)*
+   ```bash
+   vault write sys/policies/password/network-cli policy=- << 'EOF'
+   length = 20
+   rule "charset" { charset = "abcdefghijklmnopqrstuvwxyz", min-chars = 4 }
+   rule "charset" { charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", min-chars = 4 }
+   rule "charset" { charset = "0123456789", min-chars = 4 }
+   rule "charset" { charset = "!@#%^_-+=", min-chars = 2 }
+   EOF
+   ```
+
+3. **Connect Vault to LLDAP (`ldap/config`):**
+   ```bash
+   vault write ldap/config \
+     binddn="uid=vault_bind,ou=people,dc=lab,dc=local" \
+     bindpass="<vault-bind-password>" \
+     url="ldap://<AWX_VM_IP>:30389" \
+     userdn="ou=people,dc=lab,dc=local" \
+     userattr="uid" \
+     schema="openldap" \
+     password_policy="network-cli"
+   ```
+
+4. **Bind `ldap_ansible` to a 24-Hour Static Role (`ldap-ansible-role`):**
+   *(Each LDAP static role maps 1-to-1 to a single existing LDAP account; to manage additional service accounts such as EDA, create a separate static role per user.)*
+   ```bash
+   vault write ldap/static-role/ldap-ansible-role \
+     dn="uid=ldap_ansible,ou=people,dc=lab,dc=local" \
+     username="ldap_ansible" \
+     rotation_period="24h"
+   ```
+
+*Verification:* Read the managed credential from Vault and confirm it returns `username: ldap_ansible`, a generated 20-character `password`, and `ttl` counting down from `24h`:
+```bash
+vault read ldap/static-cred/ldap-ansible-role
+```
+
+---
+
+### 12.6 Configure Scoped Vault Policy & AppRole for AWX
+Grant AWX least-privilege read access strictly to the `ldap-ansible-role` credential path using **AppRole** authentication:
+
+```bash
+# 1. Create a read-only policy scoped to ldap-ansible-role
+vault policy write awx-ldap-read - << 'EOF'
+path "ldap/static-cred/ldap-ansible-role" {
+  capabilities = ["read"]
+}
+EOF
+
+# 2. Enable AppRole auth and bind awx-role to the policy
+vault auth enable approle
+vault write auth/approle/role/awx-role \
+  token_policies="awx-ldap-read" \
+  token_ttl=10m \
+  token_max_ttl=30m
+
+# 3. Retrieve Role ID and generate a Secret ID for AWX
+vault read auth/approle/role/awx-role/role-id
+vault write -f auth/approle/role/awx-role/secret-id
+```
+
+*Verification:* Save the printed `role_id` and `secret_id` UUIDs for the AWX configuration in Step 12.7.
+
+---
+
+### 12.7 Configure HashiCorp Vault Secret Lookup in AWX
+
+#### Step 1: Create the External Vault Lookup Credential
+1. Open the **AWX Web UI** (`http://<AWX_VM_IP>:32000`) and go to **Resources** → **Credentials** → **Add**.
+2. Fill in the **HashiCorp Vault Secret Lookup** fields:
+   * **Name:** `Vault-LDAP-Lookup`
+   * **Credential Type:** `HashiCorp Vault Secret Lookup`
+   * **Server URL:** `http://<AWX_VM_IP>:30820`
+   * **AppRole Role ID:** `<ROLE_ID>` *(from Step 12.6)*
+   * **AppRole Secret ID:** `<SECRET_ID>` *(from Step 12.6)*
+   * **Path to Auth:** *(Leave blank—defaults to `approle`)*
+   * **API Version:** **`v1`** *(Critical: selecting `v2` inserts `/data/` into the URL and fails with `404` against the LDAP secrets engine)*
+3. Click **Save**, then click **Test** and enter:
+   * **Name of Secret Backend:** `ldap`
+   * **Path to Secret:** `static-cred/ldap-ansible-role`
+   * **Path to Auth:** *(Leave blank)*
+   * **Key Name:** `password`
+   * **Secret Version (v2 only):** *(Leave blank)*
+4. Click **Run** and confirm the green **Test passed** notification appears.
+
+#### Step 2: Link the Dynamic Lookup to Your Router Machine Credential
+1. Go to **Resources** → **Credentials** → **Add** (or edit your existing `LDAP_Credential`).
+   * **Name:** `LDAP_Credential`
+   * **Credential Type:** `Machine`
+   * **Username:** `ldap_ansible`
+2. Click the **Key** icon next to the **Password** field:
+   * Select **`Vault-LDAP-Lookup`** and click **Next**.
+   * **Name of Secret Backend:** `ldap`
+   * **Path to Secret:** `static-cred/ldap-ansible-role`
+   * **Key Name:** `password`
+   * Click **Test** to verify **Test passed**, click **OK**, and click **Save**.
+3. Attach `LDAP_Credential` to **`Master-Network-Deploy`** (removing any older static credentials).
+
+*Verification:* On `LDAP_Credential`, the **Password** field displays the linked `Vault-LDAP-Lookup` badge rather than a static encrypted value.
+
+---
+
+### 12.8 Enable Real-Time Audit Logging & Verify Live Rotation End-to-End
+Enable Vault's `file` audit backend directed to `stdout` so every secret access and rotation is streamed live through Kubernetes pod logs:
+
+```bash
+vault audit enable file file_path=stdout
+```
+*(If Vault returns `path already in use`, run `vault audit list -detailed` to verify `file_path:stdout` is already active.)*
+
+1. **Terminal 1 — Stream live Vault audit events:**
+   ```bash
+   kubectl logs -n vault deploy/vault -f | grep --line-buffered -E "approle/login|static-cred/ldap-ansible-role|rotate-role"
+   ```
+
+2. **Terminal 2 — Trigger an immediate password rotation in LLDAP:**
+   ```bash
+   vault write -f ldap/rotate-role/ldap-ansible-role
+   ```
+
+3. **AWX Web UI — Launch `Master-Network-Deploy` (e.g., with Job Tags: `ntp`):**
+
+*Verification:*
+1. **Terminal 1 (Vault Audit Stream):** Logs `"path":"ldap/rotate-role/ldap-ansible-role"`, followed immediately by `"path":"auth/approle/login"` and `"path":"ldap/static-cred/ldap-ansible-role"` when AWX launches the job.
+2. **AWX Web UI → Views → Jobs:** `Master-Network-Deploy` completes with status **Successful** across `CR1`, `CR2`, and `JR1` using the freshly rotated password without any manual credential edits.
+3. **TARANAC Web UI → AAA Logs:** Records a **PASS** authentication and full command accounting session for `ldap_ansible` validated live against LLDAP.
+
+---
+
+> [← Back to Project Overview](./README.md)
