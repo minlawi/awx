@@ -1,7 +1,7 @@
 loopback_interfaces:
   - name: Loopback0
     description: Router-ID
-    ipv4: 10.255.10.11/32
+    ipv4: 10.255.10.12/32
   # - name: Loopback1
   #   description: BGP-Peering-Loopback
   #   ipv4: 10.255.20.2/32
