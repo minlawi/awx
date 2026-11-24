@@ -34,3 +34,7 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 10. [Refactored playbooks into `playbooks/` with a root `site.yml` master dispatcher and dynamic tag-based GitHub Actions triggering for a single master AWX Job Template](./SETUP.md#10-refactor-to-master-siteyml-and-dynamic-tag-based-cicd) – **Completed**
 11. [Deployed LLDAP on K3s and integrated it with TARANAC for centralized directory-backed AAA authentication](./SETUP.md#11-integrate-lldap-with-taranac-for-directory-backed-aaa) – **Completed**
 12. [Implemented automated 24-hour LLDAP credential rotation and AWX runtime secret lookup with HashiCorp Vault](./SETUP.md#12-automated-credential-rotation-and-runtime-lookup-with-hashicorp-vault) – **Completed**
+13. [Build break-glass fallback templates and resilience workflows for Vault, TACACS+, and LLDAP outages](./SETUP.md#13-fallback-templates-and-outage-resilience-workflows) – **In Progress**
+    * **Scenario 1 — Full Outage (Vault, TARANAC & LLDAP Unreachable):** Fallback AWX Job Template using target device local break-glass credentials (`admin` via router `local` / `password` fallback)
+    * **Scenario 2 — Vault-Only Unreachable:** Fallback AWX template/credential path when `Vault-LDAP-Lookup` fails while TARANAC and LLDAP remain reachable
+    * **Scenario 3 — LLDAP-Only Unreachable:** Fallback authentication path using a TARANAC-local emergency account or device local credentials when directory-backed authentication fails
