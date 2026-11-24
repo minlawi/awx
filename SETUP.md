@@ -1934,3 +1934,201 @@ vault audit enable file file_path=stdout
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 13. Policy-as-Code CI/CD Gate with Open Policy Agent (Conftest)
+
+Before GitHub Actions calls the AWX REST API (`POST /launch/`), we place an automated **Open Policy Agent (OPA)** validation gate using **Conftest** on the self-hosted runner. On every push to `main`, Conftest evaluates all inventory files together (`inventory/hosts.ini`, `host_vars/`, and `group_vars/`) against `policies/loopback.rego` to enforce `/32` masks on Router-ID loopbacks (`Lo0` / `Loopback0`) and block duplicate or conflicting loopback IP addresses before AWX ever touches a router.
+
+---
+
+### 13.1 Install Conftest on the Self-Hosted Runner (AWX VM)
+Install the latest Linux binary on the Ubuntu AWX VM so the local GitHub Actions runner can execute `conftest` directly:
+
+```bash
+LATEST_VERSION=$(curl -s https://api.github.com/repos/open-policy-agent/conftest/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+
+wget "https://github.com/open-policy-agent/conftest/releases/download/v${LATEST_VERSION}/conftest_${LATEST_VERSION}_Linux_x86_64.tar.gz"
+tar xzf "conftest_${LATEST_VERSION}_Linux_x86_64.tar.gz"
+sudo mv conftest /usr/local/bin/
+rm -f "conftest_${LATEST_VERSION}_Linux_x86_64.tar.gz" LICENSE README.md
+```
+
+*Verification:* Run `conftest --version` and confirm the installed version is printed.
+
+---
+
+### 13.2 Create the OPA Rego Policy (`policies/loopback.rego`)
+Create a `policies/` directory at the repository root with three validation rules covering both Cisco (`10.100.100.1 255.255.255.255`) and Juniper (`10.255.10.3/32`) address formats:
+
+1. **Router-ID `/32` Enforcement:** Any `Lo0`, `lo0`, `Loopback0`, or `Loopback 0` interface must end with `/32` or `255.255.255.255`.
+2. **No Duplicate Loopback IPs:** No two loopback interfaces across any device may share the same IPv4 address.
+3. **No Cross-Inventory Conflicts:** No loopback IP may conflict with an IP already defined in `inventory/hosts.ini` or any other YAML file under `inventory/`.
+
+```bash
+mkdir -p policies
+
+cat << 'EOF' > policies/loopback.rego
+package main
+
+import rego.v1
+
+# Helper 1: Match Lo0, lo0, Loopback0, or "Loopback 0"
+is_lo0(name) if {
+	replace(lower(name), " ", "") in {"lo0", "loopback0"}
+}
+
+# Helper 2: Get just the IP address (works for both Cisco and Juniper formats)
+# "10.100.100.1 255.255.255.255" -> "10.100.100.1"
+# "10.255.10.3/32"               -> "10.255.10.3"
+get_ip(raw) := split(split(trim_space(raw), " ")[0], "/")[0]
+
+# Rule 1: Lo0 / Loopback 0 must use a /32 mask
+deny contains msg if {
+	some file in input
+	some iface in file.contents.loopback_interfaces
+	is_lo0(iface.name)
+
+	ip_str := trim_space(iface.ipv4)
+	not endswith(ip_str, "/32")
+	not endswith(ip_str, " 255.255.255.255")
+
+	msg := sprintf("%s (%s): '%s' must use a /32 or 255.255.255.255 mask", [
+		file.path, iface.name, iface.ipv4,
+	])
+}
+
+# Rule 2: Fail if two loopback interfaces share the same IP
+deny contains msg if {
+	some file1 in input
+	some file2 in input
+	some i, iface1 in file1.contents.loopback_interfaces
+	some j, iface2 in file2.contents.loopback_interfaces
+
+	# Avoid comparing an interface to itself or reporting the same pair twice
+	sprintf("%s:%d", [file1.path, i]) < sprintf("%s:%d", [file2.path, j])
+
+	ip := get_ip(iface1.ipv4)
+	ip == get_ip(iface2.ipv4)
+
+	msg := sprintf("Duplicate loopback IP '%s' in %s (%s) and %s (%s)", [
+		ip, file1.path, iface1.name, file2.path, iface2.name,
+	])
+}
+
+# Rule 3: Fail if a loopback IP conflicts with hosts.ini or any other inventory file
+deny contains msg if {
+	some lb_file in input
+	some iface in lb_file.contents.loopback_interfaces
+	ip := get_ip(iface.ipv4)
+
+	some other_file in input
+	other_file.path != lb_file.path
+	not other_file.contents.loopback_interfaces
+
+	walk(other_file.contents, [_, val])
+	is_string(val)
+	get_ip(val) == ip
+
+	msg := sprintf("Conflict: loopback IP '%s' in %s is already used in %s", [
+		ip, lb_file.path, other_file.path,
+	])
+}
+EOF
+```
+
+*Verification:* Confirm `policies/loopback.rego` exists at the repository root alongside `inventory/` and `playbooks/`.
+
+---
+
+### 13.3 Integrate the OPA Gate into `.github/workflows/trigger-awx.yml`
+Insert the **OPA Policy Check** step immediately after `actions/checkout@v4` and **before** the AWX API trigger step. Because `inventory/hosts.ini` uses Ansible INI syntax, the step extracts its active IPv4 addresses into a temporary YAML list (`/tmp/hosts.ini.yml`) and passes it alongside all `inventory/` YAML files to `conftest test --combine`:
+
+```yaml
+# Workflow name displayed in the GitHub Actions tab
+name: Trigger AWX Selectively
+
+# Run this workflow whenever code is pushed to the main branch
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  trigger:
+    # Use the local runner hosted on the AWX VM so we can reach AWX over LAN
+    runs-on: self-hosted
+
+    steps:
+      # Download the repository with the last 2 commits so git diff can compare HEAD vs HEAD~1
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # Run OPA policy checks first; if any rule fails, the job aborts and AWX is never called
+      - name: OPA Policy Check (Loopback /32 & Duplicate IPs)
+        run: |
+          # Turn IPs from hosts.ini into a simple YAML list for Conftest
+          echo "hosts_ini_ips:" > /tmp/hosts.ini.yml
+          { grep -v '^\s*#' inventory/hosts.ini | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true; } | sed 's/^/  - /' >> /tmp/hosts.ini.yml
+
+          # Check hosts.ini + all YAML files under inventory/
+          conftest test --combine -p policies/ /tmp/hosts.ini.yml $(find inventory -name '*.yml' -o -name '*.yaml')
+
+      # Detect modified playbooks or variable files, extract matching tags, and trigger the master AWX template
+      - name: Detect changed features and launch AWX
+        env:
+          AWX_URL: ${{ secrets.AWX_BASE_URL }}
+          AWX_TOKEN: ${{ secrets.AWX_API_TOKEN }}
+          TEMPLATE_ID: 17 # Master-Network-Deploy (site.yml) Job Template ID
+        run: |
+          # Compare the latest commit against the previous one and extract unique feature names as Ansible tags
+          # Watches: playbooks/, inventory/host_vars/<device>/, and inventory/group_vars/all/
+          TAGS=$(git diff --name-only HEAD~1 HEAD \
+            | grep -E '^(playbooks/|inventory/host_vars/[^/]+/|inventory/group_vars/all/).*\.yml$' \
+            | xargs -r -n1 basename \
+            | sed 's/\.yml$//' \
+            | sort -u \
+            | paste -sd, -)
+
+          # Only call the AWX API if at least one network playbook or variable file changed
+          if [ -n "$TAGS" ]; then
+            echo "Detected feature changes. Launching Template $TEMPLATE_ID with tags: $TAGS"
+            curl -f -s -S -X POST "$AWX_URL/api/v2/job_templates/$TEMPLATE_ID/launch/" \
+              -H "Authorization: Bearer $AWX_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"job_tags\": \"$TAGS\"}"
+          else
+            # Skip AWX cleanly for docs or unrelated repo changes
+            echo "No playbook, host_vars, or global group_vars changes detected. Skipping AWX."
+          fi
+```
+
+*(Note: Because the dynamic tag regex only watches `playbooks/`, `inventory/host_vars/<device>/`, and `inventory/group_vars/all/`, commits that only modify `policies/` cleanly skip AWX.)*
+
+---
+
+### 13.4 Verify Policy Enforcement Locally & End-to-End
+
+1. **Test the clean Source of Truth locally (Linux or Windows Git Bash):**
+   *(If running `conftest.exe` locally from your project folder on Windows, add `conftest.exe` to `.gitignore` and invoke `./conftest.exe`.)*
+   ```bash
+   echo "hosts_ini_ips:" > /tmp/hosts.ini.yml
+   { grep -v '^\s*#' inventory/hosts.ini | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true; } | sed 's/^/  - /' >> /tmp/hosts.ini.yml
+   conftest test --combine -p policies/ /tmp/hosts.ini.yml $(find inventory -name '*.yml' -o -name '*.yaml')
+   ```
+   *Expected Output:* `1 test, 1 passed, 0 warnings, 0 failures, 0 exceptions` (exit code `0`).
+
+2. **Test Failure Scenarios (Commit & Push to Verify CI Gate):**
+   * **Non-`/32` Mask Test:** Change a router's `Loopback0` or `lo0` mask to `/24` or `255.255.255.0`.
+   * **Duplicate IP Test:** Assign `CR1`'s loopback IP (`10.100.100.1`) to a new or existing router's `loopback_interfaces.yml`.
+   * **Inventory Conflict Test:** Assign an existing `ansible_host` IP from `inventory/hosts.ini` to a loopback interface.
+
+*Verification:*
+1. **GitHub → Actions (`Trigger AWX Selectively`):** The **OPA Policy Check** step exits with status `1` and prints the exact `FAIL - Combined - main - ...` violation message from `policies/loopback.rego`.
+2. **AWX Web UI → Views → Jobs:** The **Detect changed features and launch AWX** step is skipped completely—no job is triggered in AWX and live routers remain untouched.
+3. **Recovery:** Correct the IP or mask in the variable file and push again; **OPA Policy Check** passes and AWX automatically launches `Master-Network-Deploy` with `job_tags: loopback_interfaces`.
+
+---
+
+> [← Back to Project Overview](./README.md)

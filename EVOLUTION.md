@@ -1,6 +1,6 @@
 # Architecture Evolution: Day 2 Pain Points & Security Comparison
 
-This document traces how each milestone enhanced the previous stage, highlighting the **Day 2 operational pain points** solved and the **security concerns** addressed (or remaining) from **Task 2 through Task 12**.
+This document traces how each milestone enhanced the previous stage, highlighting the **Day 2 operational pain points** solved and the **security concerns** addressed (or remaining) from **Task 2 through Task 13**.
 
 > **Note:** **Task 1** (installing AWX on K3s) establishes the baseline control plane, so comparisons begin at **Task 2**.
 
@@ -19,6 +19,7 @@ This document traces how each milestone enhanced the previous stage, highlightin
 | **Task&nbsp;10&nbsp;→&nbsp;Task&nbsp;9** | Master `site.yml` + Dynamic Tag CI/CD | Manually adding new AWX templates & editing CI for every new feature | Only changed features run (lower risk of breaking other configs) from one master AWX template |
 | **Task&nbsp;11&nbsp;→&nbsp;Task&nbsp;10** | LLDAP Directory + TARANAC Sync | Managing local user accounts manually inside TARANAC | Read-only `taranac_bind` account & centralized access revocation via `netadmins` group sync |
 | **Task&nbsp;12&nbsp;→&nbsp;Task&nbsp;11** | HashiCorp Vault LDAP Rotation + AWX Lookup | Manual password rotation & updating static secrets in AWX | Automated 24h LLDAP rotation (`ldap_ansible`), zero static passwords in AWX, AppRole JIT lookup & real-time Vault audit logs |
+| **Task&nbsp;13&nbsp;→&nbsp;Task&nbsp;12** | Open Policy Agent (Conftest) CI/CD Gate | Accidental duplicate IPs or wrong `/32` masks pushed straight to routers | Pre-flight Policy-as-Code gate blocks non-compliant Git SOT changes before AWX is ever called |
 
 ---
 
@@ -88,6 +89,16 @@ This document traces how each milestone enhanced the previous stage, highlightin
 * **Remaining Gaps (Future Production Hardening):**
   * **Transport Security:** Lab Vault (`http://:30820`) and LLDAP (`ldap://:30389`) run over plaintext on the private LAN; production environments should enforce TLS (`https://` and `ldaps://`) with trusted CA certificates.
   * **Auto-Unseal Mechanism:** Storing the unseal key in a root-only host file (`/root/.vault-unseal-key`) for cron auto-unseal is a lab-only convenience; production clusters should use Cloud KMS or Vault Transit Auto-Unseal.
+
+### Task 13 (Enhances Tasks 7, 8 & 10): Open Policy Agent (Conftest) Policy-as-Code CI/CD Gate
+* **Day 2 Pain Point Solved:** Prevents human copy-paste mistakes in the Git Source of Truth—such as assigning an existing router's loopback IP to a newly onboarded device or configuring a non-`/32` mask on Router-ID interfaces (`Lo0` / `Loopback0`)—from being automatically pushed to live Cisco and Juniper routers.
+* **Security & Governance Improvement:**
+  * **Shift-Left Guardrail:** Evaluates `policies/loopback.rego` across `inventory/hosts.ini`, `host_vars/`, and `group_vars/` on the self-hosted runner **before** calling the AWX REST API (`POST /launch/`). Any policy violation fails the GitHub Actions run and aborts deployment with zero router impact.
+  * **Version-Controlled Policy-as-Code:** Validation rules live alongside network data in Git with full commit history and consistent enforcement across Cisco (`255.255.255.255`) and Juniper (`/32`) syntax.
+* **Remaining Gaps (Future Production Hardening):**
+  * **Policy Tampering Protection:** Keeping `policies/` inside the same repository allows an engineer with direct push access to edit the policy alongside inventory changes; production pipelines protect `policies/` with GitHub `CODEOWNERS` / branch protection or pull policies from a separate read-only security repository.
+  * **UI Bypass Coverage:** Manual Job Template launches directly inside the AWX Web UI skip the GitHub Actions gate; runtime policy validation (e.g., querying an OPA service inside K3s during `site.yml`) can close this gap.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 14**.
 
 ---
 
