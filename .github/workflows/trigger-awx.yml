@@ -19,6 +19,16 @@ jobs:
         with:
           fetch-depth: 2
 
+      # Run OPA policy checks first; if any rule fails, the job aborts and AWX is never called
+      - name: OPA Policy Check (Loopback /32 & Duplicate IPs)
+        run: |
+          # Turn IPs from hosts.ini into a simple YAML list for Conftest
+          echo "hosts_ini_ips:" > /tmp/hosts.ini.yml
+          { grep -v '^\s*#' inventory/hosts.ini | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true; } | sed 's/^/  - /' >> /tmp/hosts.ini.yml
+
+          # Check hosts.ini + all YAML files under inventory/
+          conftest test --combine -p policies/ /tmp/hosts.ini.yml $(find inventory -name '*.yml' -o -name '*.yaml')
+
       # Detect modified playbooks or variable files, extract matching tags, and trigger the master AWX template
       - name: Detect changed features and launch AWX
         env:
