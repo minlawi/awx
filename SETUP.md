@@ -1807,7 +1807,7 @@ Run the following four steps in order from your authenticated host shell:
 2. **Create a Router-Safe Password Policy (`network-cli`):**
    *(Avoids special characters such as `?`, quotes, or shell-breaking symbols that can disrupt Cisco IOS/Juniper Junos CLI or TACACS+ parsing.)*
    ```bash
-   vault write sys/policies/password/network-cli policy=- << 'EOF'
+   vault write sys/policies/password/network-cli-policy policy=- << 'EOF'
    length = 20
    rule "charset" { charset = "abcdefghijklmnopqrstuvwxyz", min-chars = 4 }
    rule "charset" { charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", min-chars = 4 }
@@ -1825,46 +1825,46 @@ Run the following four steps in order from your authenticated host shell:
      userdn="ou=people,dc=lab,dc=local" \
      userattr="uid" \
      schema="openldap" \
-     password_policy="network-cli"
+     password_policy="network-cli-policy"
    ```
 
-4. **Bind `ldap_ansible` to a 24-Hour Static Role (`ldap-ansible-role`):**
+4. **Bind `awx` to a 24-Hour Static Role (`vault-ldap-secret-role`):**
    *(Each LDAP static role maps 1-to-1 to a single existing LDAP account; to manage additional service accounts such as EDA, create a separate static role per user.)*
    ```bash
-   vault write ldap/static-role/ldap-ansible-role \
-     dn="uid=ldap_ansible,ou=people,dc=lab,dc=local" \
-     username="ldap_ansible" \
+   vault write ldap/static-role/vault-ldap-secret-role \
+     dn="uid=awx,ou=people,dc=lab,dc=local" \
+     username="awx" \
      rotation_period="24h"
    ```
 
-*Verification:* Read the managed credential from Vault and confirm it returns `username: ldap_ansible`, a generated 20-character `password`, and `ttl` counting down from `24h`:
+*Verification:* Read the managed credential from Vault and confirm it returns `username: awx`, a generated 20-character `password`, and `ttl` counting down from `24h`:
 ```bash
-vault read ldap/static-cred/ldap-ansible-role
+vault read ldap/static-cred/vault-ldap-secret-role
 ```
 
 ---
 
 ### 12.6 Configure Scoped Vault Policy & AppRole for AWX
-Grant AWX least-privilege read access strictly to the `ldap-ansible-role` credential path using **AppRole** authentication:
+Grant AWX least-privilege read access strictly to the `vault-ldap-secret-role` credential path using **AppRole** authentication:
 
 ```bash
 # 1. Create a read-only policy scoped to ldap-ansible-role
-vault policy write awx-ldap-read - << 'EOF'
-path "ldap/static-cred/ldap-ansible-role" {
+vault policy write awx-read-ldap - << 'EOF'
+path "ldap/static-cred/vault-ldap-secret-role" {
   capabilities = ["read"]
 }
 EOF
 
 # 2. Enable AppRole auth and bind awx-role to the policy
 vault auth enable approle
-vault write auth/approle/role/awx-role \
-  token_policies="awx-ldap-read" \
+vault write auth/approle/role/awx-ldap-vault-approle \
+  token_policies="awx-read-ldap" \
   token_ttl=10m \
   token_max_ttl=30m
 
 # 3. Retrieve Role ID and generate a Secret ID for AWX
-vault read auth/approle/role/awx-role/role-id
-vault write -f auth/approle/role/awx-role/secret-id
+vault read auth/approle/role/awx-ldap-vault-approle/role-id
+vault write -f auth/approle/role/awx-ldap-vault-approle/secret-id
 ```
 
 *Verification:* Save the printed `role_id` and `secret_id` UUIDs for the AWX configuration in Step 12.7.
@@ -1885,7 +1885,7 @@ vault write -f auth/approle/role/awx-role/secret-id
    * **API Version:** **`v1`** *(Critical: selecting `v2` inserts `/data/` into the URL and fails with `404` against the LDAP secrets engine)*
 3. Click **Save**, then click **Test** and enter:
    * **Name of Secret Backend:** `ldap`
-   * **Path to Secret:** `static-cred/ldap-ansible-role`
+   * **Path to Secret:** `static-cred/vault-ldap-secret-role`
    * **Path to Auth:** *(Leave blank)*
    * **Key Name:** `password`
    * **Secret Version (v2 only):** *(Leave blank)*
@@ -1899,7 +1899,7 @@ vault write -f auth/approle/role/awx-role/secret-id
 2. Click the **Key** icon next to the **Password** field:
    * Select **`Vault-LDAP-Lookup`** and click **Next**.
    * **Name of Secret Backend:** `ldap`
-   * **Path to Secret:** `static-cred/ldap-ansible-role`
+   * **Path to Secret:** `static-cred/vault-ldap-secret-role`
    * **Key Name:** `password`
    * Click **Test** to verify **Test passed**, click **OK**, and click **Save**.
 3. Attach `LDAP_Credential` to **`Master-Network-Deploy`** (removing any older static credentials).
@@ -2130,6 +2130,295 @@ jobs:
 1. **GitHub → Actions (`Trigger AWX Selectively`):** The **OPA Policy Check** step exits with status `1` and prints the exact `FAIL - Combined - main - ...` violation message from `policies/loopback.rego`.
 2. **AWX Web UI → Views → Jobs:** The **Detect changed features and launch AWX** step is skipped completely—no job is triggered in AWX and live routers remain untouched.
 3. **Recovery:** Correct the IP or mask in the variable file and push again; **OPA Policy Check** passes and AWX automatically launches `Master-Network-Deploy` with `job_tags: loopback_interfaces`.
+
+---
+
+> [← Back to Project Overview](./README.md)
+
+## 14. Ephemeral GitHub App Tokens with HashiCorp Vault
+
+To eliminate static GitHub SSH Deploy Keys from AWX and achieve zero-standing Source Control credentials, we register a scoped **GitHub App**, update the Vault Kubernetes manifest (`vault.yaml`) to download and mount `vault-plugin-secrets-github` via an init container, roll out Vault on K3s, configure a read-only permission set and isolated AppRole (`awx-github-vault-approle`), and migrate AWX from SSH to HTTPS synchronization.
+
+---
+
+### 14.1 Create & Install the GitHub App on GitHub
+1. **Register a New GitHub App:**
+   * Open GitHub **Settings** → **Developer settings** → **GitHub Apps** → **New GitHub App**.
+   * **GitHub App name:** `<your-unique-app-name>` *(e.g., `awx-sot-vault-sync`)*
+   * **Homepage URL:** `https://github.com/<your-username>/<your-repo>`
+   * **Webhook:** Uncheck **Active** *(Vault only calls GitHub outbound to mint tokens; no inbound webhook is needed)*.
+   * **Permissions → Repository permissions:**
+     * **Contents:** `Read-only` *(all other permissions remain `No access`)*
+   * **Where can this GitHub App be installed?** Select **Only on this account**.
+   * Click **Create GitHub App**.
+2. **Record the App ID & Generate a Private Key:**
+   * On the app's **General** page, copy the numeric **App ID** (e.g., `5920246`).
+   * Scroll to **Private keys** and click **Generate a private key**. Save the downloaded `.pem` file securely.
+3. **Install the App on Your Repository & Record the Installation ID:**
+   * Click **Install App** in the left sidebar → select your account.
+   * Choose **Only select repositories** and pick your SOT repository (e.g., `minlawi/awx`) → click **Install**.
+   * Copy the numeric **Installation ID** from the browser URL (`https://github.com/settings/installations/<INSTALLATION_ID>`, e.g., `185748030`).
+4. **Copy the Private Key to the AWX VM for Vault Upload:**
+   ```bash
+   # From your workstation, copy the .pem file to /tmp/ on the AWX VM
+   scp ~/Downloads/<your-app>.private-key.pem <user>@<AWX_VM_IP>:/tmp/github-app.pem
+   ```
+
+*Verification:* Confirm `/tmp/github-app.pem` exists on the AWX VM and you have noted both your **App ID** and **Installation ID**.
+
+---
+
+### 14.2 Update `vault.yaml` for the GitHub Secrets Plugin
+Update `~/vault-k3s/vault.yaml` to:
+1. Add `plugin_directory = "/vault/plugins"` inside the `vault-config` `ConfigMap`.
+2. Add a `download-github-plugin` init container that downloads the `vault-plugin-secrets-github` binary into a shared `/vault/plugins` volume on pod startup.
+3. Mount the `vault-plugins` volume into both the init container and the main `vault` container.
+
+```bash
+cd ~/vault-k3s
+
+cat << 'EOF' > vault.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-data
+  namespace: vault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault.hcl: |
+    ui = true
+    disable_mlock = true
+    plugin_directory = "/vault/plugins"
+
+    storage "file" {
+      path = "/vault/file"
+    }
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = 1
+    }
+
+    api_addr = "http://<AWX_VM_IP>:30820"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 100:1000 /vault/file"]
+          volumeMounts:
+            - name: vault-data
+              mountPath: /vault/file
+        - name: download-github-plugin
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              PLUGIN_VER="2.1.0"
+              wget -qO /tmp/plugin.tar.gz "https://github.com/martinbaillie/vault-plugin-secrets-github/releases/download/v${PLUGIN_VER}/vault-plugin-secrets-github_${PLUGIN_VER}_linux_amd64.tar.gz"
+              tar -xzf /tmp/plugin.tar.gz -C /vault/plugins vault-plugin-secrets-github
+              chmod 755 /vault/plugins/vault-plugin-secrets-github
+              rm -f /tmp/plugin.tar.gz
+          volumeMounts:
+            - name: vault-plugins
+              mountPath: /vault/plugins
+      containers:
+        - name: vault
+          image: hashicorp/vault:latest
+          args: ["server"]
+          ports:
+            - containerPort: 8200
+              name: http
+          env:
+            - name: VAULT_ADDR
+              value: "http://127.0.0.1:8200"
+          volumeMounts:
+            - name: vault-data
+              mountPath: /vault/file
+            - name: vault-config
+              mountPath: /vault/config
+            - name: vault-plugins
+              mountPath: /vault/plugins
+      volumes:
+        - name: vault-data
+          persistentVolumeClaim:
+            claimName: vault-data
+        - name: vault-config
+          configMap:
+            name: vault-config
+        - name: vault-plugins
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  type: NodePort
+  selector:
+    app: vault
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+      nodePort: 30820
+EOF
+```
+
+---
+
+### 14.3 Roll Out the Updated Vault Deployment & Verify Plugin Binary
+Apply the updated manifest, force a clean rollout so the `ConfigMap` change (`plugin_directory`) takes effect, and confirm the plugin binary is mounted and Vault is unsealed:
+
+```bash
+# 1. Apply the updated manifest
+kubectl apply -f ~/vault-k3s/vault.yaml
+
+# 2. Restart the Deployment so the pod picks up the updated vault.hcl ConfigMap
+kubectl rollout restart -n vault deploy/vault
+
+# 3. Watch the rollout complete
+kubectl rollout status -n vault deploy/vault
+kubectl get pods -n vault
+```
+
+Verify the plugin binary inside the running pod and confirm Vault is unsealed (either automatically by the Step 12.4 cron job within 60 seconds, or manually via `vault operator unseal`):
+
+```bash
+kubectl exec -n vault deploy/vault -c vault -- ls -lh /vault/plugins/vault-plugin-secrets-github
+vault status
+```
+
+*Verification:* `kubectl get pods -n vault` shows `1/1 Running`, `ls -lh` displays the executable `/vault/plugins/vault-plugin-secrets-github` binary, and `vault status` reports `Sealed: false`.
+
+---
+
+### 14.4 Register & Enable the Vault GitHub Secrets Plugin
+Capture the plugin's SHA-256 checksum directly from the pod, register it in Vault's plugin catalog, and enable the `github` secrets engine:
+
+```bash
+PLUGIN_SHA=$(kubectl exec -n vault deploy/vault -c vault -- sha256sum /vault/plugins/vault-plugin-secrets-github | awk '{print $1}')
+echo "$PLUGIN_SHA"
+
+vault plugin register \
+  -sha256="${PLUGIN_SHA}" \
+  -command="vault-plugin-secrets-github" \
+  secret github
+
+vault secrets enable -path=github github
+```
+
+*Verification:* Run `vault secrets list` and confirm `github/` is enabled.
+
+---
+
+### 14.5 Configure the GitHub App Signing Key & Permission Set
+Upload the GitHub App ID (`5920246`) and private key (`/tmp/github-app.pem`) into Vault, securely shred the temporary `.pem` file from disk, and create a read-only permission set scoped strictly to `minlawi/awx` (`InstallationID: 185748030`):
+
+```bash
+vault write github/config \
+  app_id="5920246" \
+  prv_key=@./tmp/github-app.pem
+
+shred -u /tmp/github-app.pem
+
+vault write github/permissionset/awx-github-app - << 'EOF'
+{
+  "installation_id": 185748030,
+  "repositories": ["awx"],
+  "permissions": {
+    "contents": "read"
+  }
+}
+EOF
+```
+
+*Verification:* Test dynamic 1-hour token minting directly from the CLI:
+```bash
+vault read github/token/awx-github-app
+```
+Confirm Vault returns a fresh `ghs_...` token with `permissions: map[contents:read]`.
+
+---
+
+### 14.6 Create the Scoped Vault Policy & Isolated AppRole
+Create a dedicated policy (`awx-read-github`) and AppRole (`awx-github-vault-approle`) completely isolated from the LDAP AppRole:
+
+```bash
+vault policy write awx-read-github - << 'EOF'
+path "github/token/awx-github-app" {
+  capabilities = ["read"]
+}
+EOF
+
+vault write auth/approle/role/awx-github-vault-approle \
+  token_policies="awx-read-github" \
+  token_ttl=10m \
+  token_max_ttl=30m
+
+vault read auth/approle/role/awx-github-vault-approle/role-id
+vault write -f auth/approle/role/awx-github-vault-approle/secret-id
+```
+
+*Verification:* Save the printed `role_id` and `secret_id` UUIDs for AWX.
+
+---
+
+### 14.7 Configure AWX Lookup & Switch Project to HTTPS
+1. **Create `Vault-GitHub-Lookup` (`Resources` → `Credentials` → `Add`):**
+   * **Credential Type:** `HashiCorp Vault Secret Lookup`
+   * **Server URL:** `http://<AWX_VM_IP>:30820`
+   * **AppRole Role ID / Secret ID:** Paste values from Step 14.6
+   * **API Version:** **`v1`**
+   * Save and click **Test** with **Backend:** `github`, **Path:** `token/awx-github-app`, **Key Name:** `token` → confirm **Test passed**.
+2. **Create `GitHub App Ephemeral Token` (`Resources` → `Credentials` → `Add`):**
+   * **Credential Type:** `Source Control`
+   * **Username:** `x-access-token`
+   * **Password:** Click the **Key** icon → link **`Vault-GitHub-Lookup`** (`github` / `token/awx-github-app` / `token`) → Save.
+3. **Update `Network-Automation-SOT` (`Resources` → `Projects` → `Edit`):**
+   * **Source Control URL:** `https://github.com/minlawi/awx.git`
+   * **Source Control Credential:** `GitHub App Ephemeral Token`
+   * Ensure **Update Revision on Launch** is checked and click **Save**.
+4. **Remove Legacy SSH Keys:** Delete the old Deploy Key from GitHub (**Settings** → **Deploy keys**) and remove `GitHub SSH Key` from AWX (**Resources** → **Credentials**).
+
+*Verification:* Confirm **Source Control Update** on `Network-Automation-SOT`, **Sync** on `Git-SOT-Inventory`, and a full `Master-Network-Deploy` run all finish **Successful** (green), while `kubectl logs -n vault deploy/vault -f` logs `auth/approle/login` followed by `github/token/awx-github-app`.
 
 ---
 

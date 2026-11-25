@@ -1,6 +1,6 @@
 # Architecture Evolution: Day 2 Pain Points & Security Comparison
 
-This document traces how each milestone enhanced the previous stage, highlighting the **Day 2 operational pain points** solved and the **security concerns** addressed (or remaining) from **Task 2 through Task 13**.
+This document traces how each milestone enhanced the previous stage, highlighting the **Day 2 operational pain points** solved and the **security concerns** addressed (or remaining) from **Task 2 through Task 14**.
 
 > **Note:** **Task 1** (installing AWX on K3s) establishes the baseline control plane, so comparisons begin at **Task 2**.
 
@@ -20,6 +20,7 @@ This document traces how each milestone enhanced the previous stage, highlightin
 | **Task&nbsp;11&nbsp;→&nbsp;Task&nbsp;10** | LLDAP Directory + TARANAC Sync | Managing local user accounts manually inside TARANAC | Read-only `taranac_bind` account & centralized access revocation via `netadmins` group sync |
 | **Task&nbsp;12&nbsp;→&nbsp;Task&nbsp;11** | HashiCorp Vault LDAP Rotation + AWX Lookup | Manual password rotation & updating static secrets in AWX | Automated 24h LLDAP rotation (`ldap_ansible`), zero static passwords in AWX, AppRole JIT lookup & real-time Vault audit logs |
 | **Task&nbsp;13&nbsp;→&nbsp;Task&nbsp;12** | Open Policy Agent (Conftest) CI/CD Gate | Accidental duplicate IPs or wrong `/32` masks pushed straight to routers | Pre-flight Policy-as-Code gate blocks non-compliant Git SOT changes before AWX is ever called |
+| **Task&nbsp;14&nbsp;→&nbsp;Task&nbsp;2&nbsp;&amp;&nbsp;12** | Vault GitHub App Plugin + Ephemeral HTTPS Sync | Static SSH Deploy Keys stored permanently in AWX & GitHub | Zero-standing GitHub credentials; 1-hour read-only `ghs_...` tokens minted on demand via isolated `awx-github-vault-approle` |
 
 ---
 
@@ -81,11 +82,11 @@ This document traces how each milestone enhanced the previous stage, highlightin
   * Lab LDAP uses plain `ldap://` (`30389`) instead of `ldaps://` *(Future Production Hardening)*.
 
 ### Task 12 (Enhances Task 11): HashiCorp Vault Automated Credential Rotation & Runtime Lookup
-* **Day 2 Pain Point Solved:** Eliminates manual password rotation and removes static passwords from AWX completely. Vault's **LDAP Secrets Engine** (`ldap/static-role/ldap-ansible-role`) automatically rotates the `ldap_ansible` password in LLDAP every 24 hours using a router-safe `network-cli` password policy, while AWX fetches the current password dynamically at job runtime. A native host Vault CLI (`VAULT_ADDR` in `/etc/profile.d/vault.sh`) and a lab auto-unseal cron job keep Vault operational across VM reboots without manual `kubectl exec` commands.
+* **Day 2 Pain Point Solved:** Eliminates manual password rotation and removes static passwords from AWX completely. Vault's **LDAP Secrets Engine** (`ldap/static-role/vault-ldap-secret-role`) automatically rotates the `awx` password in LLDAP every 24 hours using a router-safe `network-cli-policy` password policy, while AWX fetches the current password dynamically at job runtime. A native host Vault CLI (`VAULT_ADDR` in `/etc/profile.d/vault.sh`) and a lab auto-unseal cron job keep Vault operational across VM reboots without manual `kubectl exec` commands.
 * **Security Improvement:**
-  * **Zero Static Passwords in AWX:** AWX never stores the `ldap_ansible` password in its database; it authenticates via a scoped **AppRole** (`awx-ldap-read` policy, restricted solely to `read` on `ldap/static-cred/ldap-ansible-role`) using **HashiCorp Vault Secret Lookup** (`API Version: v1`).
-  * **Separation of Duties:** `vault_bind` (member of `lldap_password_manager`) is dedicated to password rotation and has no router login rights, while `ldap_ansible` (member of `netadmins`) handles router automation and has no directory admin rights.
-  * **End-to-End Auditability:** Real-time Vault audit logging (`file_path=stdout`) records every `auth/approle/login`, `ldap/static-cred/ldap-ansible-role` read, and `ldap/rotate-role/ldap-ansible-role` rotation, correlating directly with TARANAC's AAA command accounting logs.
+  * **Zero Static Passwords in AWX:** AWX never stores the `awx` password in its database; it authenticates via a scoped **AppRole** (`awx-read-ldap` policy, restricted solely to `read` on `ldap/static-cred/vault-ldap-secret-role`) using **HashiCorp Vault Secret Lookup** (`API Version: v1`).
+  * **Separation of Duties:** `vault_bind` (member of `lldap_password_manager`) is dedicated to password rotation and has no router login rights, while `awx` (member of `netadmins`) handles router automation and has no directory admin rights.
+  * **End-to-End Auditability:** Real-time Vault audit logging (`file_path=stdout`) records every `auth/approle/login`, `ldap/static-cred/vault-ldap-secret-role` read, and `ldap/rotate-role/vault-ldap-secret-role` rotation, correlating directly with TARANAC's AAA command accounting logs.
 * **Remaining Gaps (Future Production Hardening):**
   * **Transport Security:** Lab Vault (`http://:30820`) and LLDAP (`ldap://:30389`) run over plaintext on the private LAN; production environments should enforce TLS (`https://` and `ldaps://`) with trusted CA certificates.
   * **Auto-Unseal Mechanism:** Storing the unseal key in a root-only host file (`/root/.vault-unseal-key`) for cron auto-unseal is a lab-only convenience; production clusters should use Cloud KMS or Vault Transit Auto-Unseal.
@@ -98,7 +99,16 @@ This document traces how each milestone enhanced the previous stage, highlightin
 * **Remaining Gaps (Future Production Hardening):**
   * **Policy Tampering Protection:** Keeping `policies/` inside the same repository allows an engineer with direct push access to edit the policy alongside inventory changes; production pipelines protect `policies/` with GitHub `CODEOWNERS` / branch protection or pull policies from a separate read-only security repository.
   * **UI Bypass Coverage:** Manual Job Template launches directly inside the AWX Web UI skip the GitHub Actions gate; runtime policy validation (e.g., querying an OPA service inside K3s during `site.yml`) can close this gap.
-  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 14**.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 15**.
+
+### Task 14 (Enhances Tasks 2 & 12): Ephemeral GitHub App Tokens via HashiCorp Vault
+* **Day 2 Pain Point Solved:** Eliminates static GitHub SSH Deploy Keys (`ed25519`) from both AWX and GitHub so engineers no longer manage or manually rotate standing repository keys. Every AWX Project Sync and Inventory Sync dynamically pulls the latest commits over HTTPS (`https://github.com/minlawi/awx.git`) using a freshly minted token.
+* **Security Improvement:**
+  * **Zero-Standing Source Control Credentials:** Unlike LDAP password rotation, `github/token/awx-github-app` stores no standing token in Vault or AWX. Vault signs a short-lived JWT with the GitHub App's `.pem` private key (`AppID: xxxxxxx`) and requests a brand-new, **1-hour read-only installation token (`ghs_...`)** scoped strictly to `minlawi/awx` (`InstallationID: yyyyyyyyy`), which AWX injects in memory via `GIT_ASKPASS` and discards immediately.
+  * **Blast-Radius Isolation:** Source Control authentication (`awx-github-vault-approle` → `awx-read-github`) is strictly isolated from Network AAA authentication (`awx-ldap-vault-approle` → `awx-read-ldap`), ensuring a compromised lookup credential in one domain cannot access secrets in the other.
+* **Remaining Gaps (Future Production Hardening):**
+  * **Master Signing Key Rotation:** While `ghs_...` tokens expire after 1 hour, the GitHub App `.pem` private key stored in Vault (`github/config`) remains static and should be rotated periodically (e.g., every 90 days) in production.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 15**.
 
 ---
 
