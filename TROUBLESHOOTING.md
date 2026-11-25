@@ -17,7 +17,7 @@ A log of real errors encountered while building this multi-vendor AWX + GitOps +
 ## 1. Legacy Cisco IOS SSH Key Exchange Failure (`no acceptable kex algorithm`)
 
 ### Error Output
-![Cisco IOS SSH KEX Error](./ERROR/ansible-pyblissh.png)
+![Cisco IOS SSH KEX Error](./assests/ansible-pyblissh.png)
 
 ### Root Cause
 By default, Ansible AWX's built-in Execution Environment (`awx-ee`) does not include the `ansible-pylibssh` package. Without it, Ansible automatically falls back to `paramiko` for SSH connections, which rejects the legacy SSH key exchange (`kex`) algorithms and ciphers used by older Cisco IOS images running in EVE-NG.
