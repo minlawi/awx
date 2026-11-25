@@ -16,7 +16,7 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 | **Secrets Management** | HashiCorp Vault | **HashiCorp Vault** on K3s using the LDAP Secrets Engine for automated 24-hour password rotation in LLDAP and AppRole-based runtime lookup from AWX |
 
 ## Architecture Topology
-![Multi-Vendor Network Automation Topology](./ERROR/architecture.png)
+![Multi-Vendor Network Automation Topology](./assests/architecture.png)
 
 ## Project Notes
 [![View Notes on Excalidraw](https://img.shields.io/badge/Project_Notes-Excalidraw-6965DB?style=for-the-badge&logo=excalidraw&logoColor=white)](https://app.excalidraw.com/s/1GkvF5YK7dJ/8NU2mcP2T52)
