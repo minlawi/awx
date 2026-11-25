@@ -287,7 +287,7 @@ The AWX group name **must match** the `hosts:` pattern defined in `set_hostname.
 When running against an older Cisco IOS image in EVE-NG using the **Default Execution Environment**, AWX syncs the project cleanly, matches `R1` under `cisco_routers`, and fails during the SSH handshake:
 
 ### Error Output
-![Cisco IOS SSH KEX Error](./ERROR/ansible-pyblissh.png)
+![Cisco IOS SSH KEX Error](./assests/ansible-pyblissh.png)
 
 > **How to Fix This Issue:** Follow **[1. Legacy Cisco IOS SSH Key Exchange Failure (`no acceptable kex algorithm`)](./TROUBLESHOOTING.md#1-legacy-cisco-ios-ssh-key-exchange-failure-no-acceptable-kex-algorithm)** in `TROUBLESHOOTING.md` to bake a custom Cisco Execution Environment (`localhost/awx-ee-cisco:latest`), assign it to this Job Template, and re-run the job.
 
@@ -917,6 +917,8 @@ To support both legacy **Cisco IOS** routers and **Juniper Junos** routers clean
 
 > **Why `juniper.device` instead of `junipernetworks.junos`?**  
 > The legacy `junipernetworks.junos` collection is deprecated. **`juniper.device`** is officially maintained by Juniper Networks and uses **NETCONF/PyEZ** (`junos-eznc`), providing native candidate-config commits, automatic diffs, and full compatibility with modern Ansible-core releases.
+
+![Juniper Collections](./assests/juniper-collections.png)
 
 ---
 
