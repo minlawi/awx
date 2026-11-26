@@ -32,7 +32,7 @@ vault secrets list
 # Ensure the .pem file is located at `/tmp/github-app.pem` before running.
 vault write github/config \
   app_id="5920246" \
-  prv_key=@/tmp/github-app.pem
+  prv_key=@./tmp/github-app.pem
 
 # Verification: Confirm `app_id` is stored cleanly (private key is not echoed back).
 vault read github/config
