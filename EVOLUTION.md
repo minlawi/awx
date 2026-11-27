@@ -1,6 +1,6 @@
 # Architecture Evolution: Problems Solved, Improvements & Limitations
 
-This document traces how each milestone improved or expanded on the previous stage, highlighting **what was solved**, the **key improvements**, and the **current limitations** from **Task 2 through Task 14**.
+This document traces how each milestone improved or expanded on the previous stage, highlighting **what was solved**, the **key improvements**, and the **current limitations** from **Task 2 through Task 15**.
 
 > **Note:** **Task 1** (installing AWX on K3s) establishes the baseline control plane, so comparisons begin at **Task 2**.
 
@@ -21,6 +21,7 @@ This document traces how each milestone improved or expanded on the previous sta
 | **Task&nbsp;12&nbsp;(Enhances&nbsp;Task&nbsp;11)** | HashiCorp Vault LDAP Rotation + AWX Lookup | Manual password rotation & updating static secrets in AWX | Automated 24h LLDAP rotation (`ldap_ansible`), zero static passwords in AWX, AppRole JIT lookup & real-time Vault audit logs |
 | **Task&nbsp;13&nbsp;(Enhances&nbsp;Task&nbsp;12)** | Open Policy Agent (Conftest) CI/CD Gate | Accidental duplicate IPs or wrong `/32` masks pushed straight to routers | Pre-flight Policy-as-Code gate blocks non-compliant Git SOT changes before AWX is ever called |
 | **Task&nbsp;14&nbsp;(Enhances&nbsp;Tasks&nbsp;2&nbsp;&amp;&nbsp;12)** | Vault GitHub App Plugin + Ephemeral HTTPS Sync | Static SSH Deploy Keys stored permanently in AWX & GitHub | Zero-standing GitHub credentials; 1-hour read-only `ghs_...` tokens minted on demand via isolated `awx-github-vault-approle` |
+| **Task&nbsp;15&nbsp;(Enhances&nbsp;Tasks&nbsp;12&nbsp;&amp;&nbsp;14)** | 3-Node Vault Raft Cluster (`StatefulSet`) | Single-pod Vault `file` storage SPOF & no HA failover | Zero-data-loss migration (`file` → `raft`), 3-node quorum with automatic leader election & cluster-aware auto-unseal |
 
 ---
 
@@ -101,7 +102,7 @@ This document traces how each milestone improved or expanded on the previous sta
 * **Current Limitations (Future Production Hardening):**
   * **Policy Tampering Protection:** Keeping `policies/` inside the same repository allows an engineer with direct push access to edit the policy alongside inventory changes; production pipelines protect `policies/` with GitHub `CODEOWNERS` / branch protection or pull policies from a separate read-only security repository.
   * **UI Bypass Coverage:** Manual Job Template launches directly inside the AWX Web UI skip the GitHub Actions gate; runtime policy validation (e.g., querying an OPA service inside K3s during `site.yml`) can close this gap.
-  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 15**.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 16**.
 
 ### Task 14 (Enhances Tasks 2 & 12): Ephemeral GitHub App Tokens via HashiCorp Vault
 * **What We Solved:** Eliminated static GitHub SSH Deploy Keys (`ed25519`) from both AWX and GitHub so engineers no longer manage or manually rotate standing repository keys. Every AWX Project Sync and Inventory Sync dynamically pulls the latest commits over HTTPS (`https://github.com/minlawi/awx.git`) using a freshly minted token.
@@ -110,7 +111,25 @@ This document traces how each milestone improved or expanded on the previous sta
   * **Blast-Radius Isolation:** Source Control authentication (`awx-github-vault-approle` → `awx-read-github`) is strictly isolated from Network AAA authentication (`awx-ldap-vault-approle` → `awx-read-ldap`), ensuring a compromised lookup credential in one domain cannot access secrets in the other.
 * **Current Limitations (Future Production Hardening):**
   * **Master Signing Key Rotation:** While `ghs_...` tokens expire after 1 hour, the GitHub App `.pem` private key stored in Vault (`github/config`) remains static and should be rotated periodically (e.g., every 90 days) in production.
-  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 15**.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 16**.
+
+### Task 15 (Enhances Tasks 12 & 14): 3-Node HashiCorp Vault Raft Cluster (`StatefulSet`)
+* **What We Solved:** Eliminated the single-pod Vault `file` storage limitation (`HA Enabled: false`) by migrating Vault to a **3-node High-Availability Raft `StatefulSet`** (`vault-0`, `vault-1`, `vault-2`) via `vault operator migrate` with zero data loss—preserving all existing `ldap/` and `github/` secrets engines, AppRoles, policies, the GitHub plugin (`v2.3.2`), and the `:30820` NodePort Service.
+* **Key Improvement:**
+
+  | Feature | `file` Storage (Tasks 12–14) | `raft` Integrated Storage (Task 15) |
+  | :--- | :--- | :--- |
+  | **Kubernetes Workload** | Single-replica `Deployment` | 3-replica `StatefulSet` + headless Service (`vault-internal`) |
+  | **High Availability (HA)** | Not supported (`HA Enabled: false`) | Native HA (`HA Enabled: true`, 1 Leader + 2 Standby Voters) |
+  | **Data Replication** | None (single local PVC) | Automatic Raft consensus replication across 3 per-pod PVCs |
+  | **Pod Failover** | Downtime until single pod restarts | Automatic leader election; tolerates 1 pod failure without outage |
+  | **Backups** | Manual offline filesystem tarball | Built-in online snapshots (`vault operator raft snapshot save`) |
+
+  * **Cluster-Aware Auto-Unseal:** Upgraded `/usr/local/bin/vault-autounseal.sh` with `flock` locking to inspect and unseal all three pods in order (`vault-0` first for leader election, then `vault-1` and `vault-2`) after restarts or pod deletions.
+* **Current Limitations (Future Production Hardening):**
+  * **Single Underlying Host:** Because all three Raft pods run on the same single-node K3s VM, pod-level failover works cleanly, but a host VM failure still takes down all three replicas; production clusters spread Raft peers across 3 separate nodes/availability zones.
+  * **Auto-Unseal & Transport:** Still relies on the host-level Shamir cron script and plaintext HTTP (`:30820`) on the lab LAN; production clusters should use Cloud KMS/Transit Auto-Unseal and end-to-end TLS.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 16**.
 
 ---
 

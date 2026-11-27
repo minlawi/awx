@@ -1,6 +1,6 @@
 # Multi-Vendor Network Automation CI/CD Pipeline (AWX, GitOps, OPA, TACACS+ & Vault)
 
-This project automates network configuration updates for Cisco IOS and Juniper Junos devices. It uses a Git repository as the single source of truth—whenever changes are pushed, a local GitHub Actions runner validates inventory variables against Open Policy Agent (OPA) rules via Conftest, detects modified playbooks or feature variable files over the LAN, extracts the corresponding Ansible tags, and triggers a single master Ansible AWX Job Template (`site.yml`) so only the changed features run. This approach stops manual configuration drift and invalid IP assignments before they reach live routers, scales cleanly without manual CI/CD or AWX template updates, and keeps deployments secure with centralized LLDAP + TACACS+ authentication, automated credential rotation and ephemeral GitHub token minting via HashiCorp Vault, and custom Execution Environments.
+This project automates network configuration updates for Cisco IOS and Juniper Junos devices. It uses a Git repository as the single source of truth—whenever changes are pushed, a local GitHub Actions runner validates inventory variables against Open Policy Agent (OPA) rules via Conftest, detects modified playbooks or feature variable files over the LAN, extracts the corresponding Ansible tags, and triggers a single master Ansible AWX Job Template (`site.yml`) so only the changed features run. This approach stops manual configuration drift and invalid IP assignments before they reach live routers, scales cleanly without manual CI/CD or AWX template updates, and keeps deployments secure with centralized LLDAP + TACACS+ authentication, automated credential rotation and ephemeral GitHub token minting via a 3-node HashiCorp Vault Raft cluster, and custom Execution Environments.
 
 > **Note:** This project is built from scratch for learning purposes to explore how each tool and workflow step fits together, and is not intended for direct production use. Hopefully, it gives you a clear starting point for your own lab!
 
@@ -8,12 +8,12 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 
 | Category | Component | Requirement / Details |
 | :--- | :--- | :--- |
-| **Control Node & AWX** | Linux VM & Kubernetes | **Ubuntu Server** VM running **K3s** with **Ansible AWX**, **LLDAP**, and **HashiCorp Vault** deployed as containers, plus a local **GitHub Self-Hosted Runner** for LAN triggering |
+| **Control Node & AWX** | Linux VM & Kubernetes | **Ubuntu Server** VM running **K3s** with **Ansible AWX**, **LLDAP**, and a **3-node HashiCorp Vault Raft cluster** deployed as containers, plus a local **GitHub Self-Hosted Runner** for LAN triggering |
 | **Version Control & CI/CD** | GitHub Private Repo | **HTTPS synchronization using ephemeral 1-hour GitHub App installation tokens** minted on demand by HashiCorp Vault (replacing static SSH Deploy Keys) |
 | **Policy-as-Code** | Open Policy Agent (Conftest) | **Conftest** installed on the self-hosted runner to evaluate Rego policies (`policies/loopback.rego`) against `inventory/` before triggering AWX |
 | **Network Lab & Devices** | EVE-NG & Target Routers | **EVE-NG** hosting virtual **Cisco IOS** (management via **SSH**) and **Juniper Junos** (management via **NETCONF**) routers with L3 reachability to AWX |
 | **Authentication (AAA)** | TARANAC & LLDAP | **TARANAC** (formerly known as **tacacsgui**) integrated with **LLDAP** over LDAP for centralized directory-backed TACACS+ authentication |
-| **Secrets Management** | HashiCorp Vault | **HashiCorp Vault** on K3s using the LDAP Secrets Engine (automated password rotation in LLDAP) and the GitHub Secrets Plugin (dynamic 1-hour installation tokens) with isolated AppRole lookups from AWX |
+| **Secrets Management** | HashiCorp Vault | **3-node HashiCorp Vault Raft `StatefulSet`** on K3s using integrated Raft storage, the LDAP Secrets Engine (automated password rotation in LLDAP), and the GitHub Secrets Plugin (dynamic 1-hour installation tokens) with isolated AppRole lookups from AWX |
 
 ## Architecture Topology
 ![Multi-Vendor Network Automation Topology](./assests/architecture.png)
@@ -37,7 +37,8 @@ This project automates network configuration updates for Cisco IOS and Juniper J
 12. [Implemented automated 24-hour LLDAP credential rotation and AWX runtime secret lookup with HashiCorp Vault](./SETUP.md#12-automated-credential-rotation-and-runtime-lookup-with-hashicorp-vault) – **Completed**
 13. [Implemented an Open Policy Agent (OPA) Policy-as-Code CI/CD gate with Conftest to enforce `/32` Router-ID loopbacks (`Lo0`/`Loopback0`) and block duplicate or conflicting IPs across inventory before triggering AWX](./SETUP.md#13-policy-as-code-cicd-gate-with-open-policy-agent-conftest) – **Completed**
 14. [Replaced static GitHub SSH Deploy Keys with ephemeral 1-hour GitHub App installation tokens minted on demand by HashiCorp Vault over HTTPS](./SETUP.md#14-ephemeral-github-app-tokens-with-hashicorp-vault) – **Completed**
-15. [Build break-glass fallback templates and resilience workflows for Vault, TACACS+, and LLDAP outages](./SETUP.md#15-fallback-templates-and-outage-resilience-workflows) – **In Progress**
+15. [Migrated single-node HashiCorp Vault (`file` storage) to a 3-node High-Availability Raft `StatefulSet` cluster on K3s with zero data loss and cluster-aware auto-unseal](./SETUP.md#15-migrate-single-node-vault-file-to-a-3-node-raft-cluster-on-k3s) – **Completed**
+16. [Build break-glass fallback templates and resilience workflows for Vault, TACACS+, and LLDAP outages](./SETUP.md#16-fallback-templates-and-outage-resilience-workflows) – **In Progress**
     * **Scenario 1 — Full Outage (Vault, TARANAC & LLDAP Unreachable):** Fallback AWX Job Template using target device local break-glass credentials (`admin` via router `local` / `password` fallback)
     * **Scenario 2 — Vault-Only Unreachable:** Fallback AWX template/credential path when `Vault-LDAP-Lookup` fails while TARANAC and LLDAP remain reachable
     * **Scenario 3 — LLDAP-Only Unreachable:** Fallback authentication path using a TARANAC-local emergency account or device local credentials when directory-backed authentication fails

@@ -2423,3 +2423,388 @@ vault write -f auth/approle/role/awx-github-vault-approle/secret-id
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 15. Migrate Single-Node Vault (File) to a 3-Node Raft Cluster on K3s
+
+To transition HashiCorp Vault from a single-node `Deployment` (`storage "file"`) to a 3-node High-Availability `StatefulSet` (`storage "raft"`) with **zero data loss**, we use `vault operator migrate` to copy all existing secrets engines (`ldap/`, `github/`), AppRoles, policies, and Shamir seal configuration directly into Raft integrated storage while preserving the GitHub plugin (`v2.3.2`) and existing `:30820` NodePort Service.
+
+---
+
+### 15.1 Pre-Migration Checks & Full Backup
+Verify your current Vault state, StorageClass, and available disk space before making changes:
+
+```bash
+kubectl get all,pvc,cm -n vault
+vault status
+kubectl get sc
+df -h /var/lib/rancher/k3s/storage
+```
+
+Retrieve the exact host directory backing `pvc/vault-data` by querying both `.spec.local.path` and `.spec.hostPath.path` (which handles both K3s `local-path` PV formats automatically):
+
+```bash
+PV_NAME=$(kubectl get pvc vault-data -n vault -o jsonpath='{.spec.volumeName}')
+PVC_DIR=$(kubectl get pv "$PV_NAME" -o jsonpath='{.spec.local.path}{.spec.hostPath.path}')
+echo "$PVC_DIR"
+```
+
+*Verification:* Confirm `echo "$PVC_DIR"` prints a single valid host path (e.g., `/var/lib/rancher/k3s/storage/pvc-..._vault_vault-data`) and `sudo ls -la "$PVC_DIR"` shows Vault's subdirectories (`audit`, `auth`, `core`, `logical`, `sys`).
+
+Back up your Kubernetes manifests and the raw `/vault/file` data:
+
+```bash
+mkdir -p ~/vault-file-backup
+kubectl get deploy,cm,svc,pvc -n vault -o yaml > ~/vault-file-backup/vault-k8s-backup.yaml
+sudo tar -czf ~/vault-file-backup/vault-file-data.tar.gz -C "$PVC_DIR" .
+ls -lh ~/vault-file-backup/
+```
+
+*Verification:* Confirm both `vault-k8s-backup.yaml` and `vault-file-data.tar.gz` exist and are non-empty.
+
+---
+
+### 15.2 Stop the Existing Single-Node Vault
+Scale `deploy/vault` to `0` so no writes occur to `/vault/file` during migration:
+
+```bash
+kubectl scale deploy/vault -n vault --replicas=0
+kubectl get pods -n vault
+```
+
+*Verification:* Confirm no Vault pods are running.
+
+---
+
+### 15.3 Create the Headless Service & Pre-Create `data-vault-0` PVC
+* `publishNotReadyAddresses: true` allows Raft peers to resolve `vault-0.vault-internal` even while sealed.
+* Pre-creating `data-vault-0` (matching the `StatefulSet` `volumeClaimTemplates` naming convention `<template-name>-<pod-name>`) lets us migrate data into it before `vault-0` starts.
+
+```bash
+cat << 'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-internal
+  namespace: vault
+  labels:
+    app: vault
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+    - name: internal
+      port: 8201
+      targetPort: 8201
+  selector:
+    app: vault
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-vault-0
+  namespace: vault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+```
+
+---
+
+### 15.4 Run `vault operator migrate` (`file` → `raft`)
+> **Important Gotcha:** Do **not** mount `/vault/file` with `readOnly: true`. Vault writes a temporary lock file (`/vault/file/core/_migration...`) to the source backend during migration, which fails with `read-only file system` if mounted read-only. If you ever need to retry this pod, ensure `/vault/data/*` is wiped first (`rm -rf /vault/data/*`) so partial Raft state does not block the retry.
+
+Deploy the one-shot migration pod:
+
+```bash
+cat << 'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vault-migrate
+  namespace: vault
+spec:
+  restartPolicy: Never
+  securityContext:
+    fsGroup: 1000
+  initContainers:
+    - name: fix-permissions
+      image: busybox:1.36
+      command: ["sh", "-c", "rm -rf /vault/data/* && chown -R 100:1000 /vault/data"]
+      volumeMounts:
+        - name: raft-data
+          mountPath: /vault/data
+  containers:
+    - name: migrate
+      image: hashicorp/vault:latest
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 1000
+      command:
+        - sh
+        - -c
+        - |
+          cat << 'HCL' > /tmp/migrate.hcl
+          storage_source "file" {
+            path = "/vault/file"
+          }
+          storage_destination "raft" {
+            path    = "/vault/data"
+            node_id = "vault-0"
+          }
+          cluster_addr = "http://vault-0.vault-internal:8201"
+          HCL
+          vault operator migrate -config=/tmp/migrate.hcl
+      volumeMounts:
+        - name: old-file-data
+          mountPath: /vault/file
+        - name: raft-data
+          mountPath: /vault/data
+  volumes:
+    - name: old-file-data
+      persistentVolumeClaim:
+        claimName: vault-data
+    - name: raft-data
+      persistentVolumeClaim:
+        claimName: data-vault-0
+EOF
+```
+
+Watch the logs until it prints `Success! All of the keys have been migrated.`, then delete the temporary pod:
+
+```bash
+kubectl logs -n vault -f vault-migrate
+kubectl delete pod vault-migrate -n vault
+```
+
+*Verification:* Migration logs confirm all `auth/`, `logical/`, `sys/`, and `audit/` paths were copied into Raft and `vault-migrate` is deleted.
+
+---
+
+### 15.5 Update `vault-config` & Deploy the 3-Node `StatefulSet`
+Each pod shares the same `vault.hcl` ConfigMap while receiving its unique `VAULT_RAFT_NODE_ID`, `VAULT_API_ADDR`, and `VAULT_CLUSTER_ADDR` via environment variables. Both `fix-permissions` and `download-github-plugin` (`v2.3.2`) initContainers are preserved.
+
+```bash
+cat << 'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault.hcl: |
+    ui = true
+    disable_mlock = true
+    plugin_directory = "/vault/plugins"
+
+    storage "raft" {
+      path = "/vault/data"
+      retry_join {
+        leader_api_addr = "http://vault-0.vault-internal:8200"
+      }
+      retry_join {
+        leader_api_addr = "http://vault-1.vault-internal:8200"
+      }
+      retry_join {
+        leader_api_addr = "http://vault-2.vault-internal:8200"
+      }
+    }
+
+    listener "tcp" {
+      address         = "0.0.0.0:8200"
+      cluster_address = "0.0.0.0:8201"
+      tls_disable     = 1
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  serviceName: vault-internal
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown -R 100:1000 /vault/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /vault/data
+        - name: download-github-plugin
+          image: curlimages/curl:8.10.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              curl -fsSL -o /vault/plugins/vault-plugin-secrets-github \
+                https://github.com/martinbaillie/vault-plugin-secrets-github/releases/download/v2.3.2/vault-plugin-secrets-github-linux-amd64
+              chmod 755 /vault/plugins/vault-plugin-secrets-github
+          volumeMounts:
+            - name: vault-plugins
+              mountPath: /vault/plugins
+      containers:
+        - name: vault
+          image: hashicorp/vault:latest
+          imagePullPolicy: IfNotPresent
+          args: ["server"]
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: VAULT_ADDR
+              value: "http://127.0.0.1:8200"
+            - name: VAULT_RAFT_NODE_ID
+              value: "$(HOSTNAME)"
+            - name: VAULT_API_ADDR
+              value: "http://$(HOSTNAME).vault-internal:8200"
+            - name: VAULT_CLUSTER_ADDR
+              value: "http://$(HOSTNAME).vault-internal:8201"
+          ports:
+            - containerPort: 8200
+              name: http
+            - containerPort: 8201
+              name: internal
+          volumeMounts:
+            - name: data
+              mountPath: /vault/data
+            - name: vault-config
+              mountPath: /vault/config
+            - name: vault-plugins
+              mountPath: /vault/plugins
+      volumes:
+        - name: vault-config
+          configMap:
+            name: vault-config
+        - name: vault-plugins
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi
+EOF
+```
+
+Wait until all three pods are `1/1 Running`:
+
+```bash
+kubectl get pods -n vault -w
+```
+
+---
+
+### 15.6 Unseal the Cluster & Verify Quorum
+Unseal `vault-0` first using your existing Shamir unseal key so it elects itself as the Raft leader, wait ~5 seconds, then unseal `vault-1` and `vault-2`:
+
+```bash
+kubectl exec -n vault vault-0 -- vault operator unseal '<YOUR_UNSEAL_KEY>'
+sleep 5
+kubectl exec -n vault vault-1 -- vault operator unseal '<YOUR_UNSEAL_KEY>'
+kubectl exec -n vault vault-2 -- vault operator unseal '<YOUR_UNSEAL_KEY>'
+```
+
+Verify Raft quorum, HA status, and migrated secrets engines:
+
+```bash
+vault status
+vault operator raft list-peers
+vault secrets list
+```
+
+*Verification:*
+* `vault status` shows `Storage Type: raft`, `HA Enabled: true`, `Sealed: false`.
+* `vault operator raft list-peers` lists `vault-0` (`leader`), `vault-1` (`follower`), and `vault-2` (`follower`), all `voter: true`.
+* `vault secrets list` shows `ldap/` and `github/` intact.
+
+---
+
+### 15.7 Upgrade the Host Auto-Unseal Cron Script for Raft
+Replace `/usr/local/bin/vault-autounseal.sh` so the existing root cronjob (`* * * * * /usr/local/bin/vault-autounseal.sh`) loops through all three Raft pods using `flock` to avoid overlapping runs:
+
+```bash
+sudo cp /usr/local/bin/vault-autounseal.sh /usr/local/bin/vault-autounseal.sh.bak
+
+sudo tee /usr/local/bin/vault-autounseal.sh > /dev/null << 'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+
+export PATH="/usr/local/bin:/usr/bin:/bin"
+export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+
+NAMESPACE="vault"
+KEY_FILE="/root/.vault-unseal-key"
+LOCK_FILE="/var/run/vault-autounseal.lock"
+PODS=("vault-0" "vault-1" "vault-2")
+
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
+[[ -r "$KEY_FILE" ]] || exit 1
+UNSEAL_KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
+[[ -n "$UNSEAL_KEY" ]] || exit 1
+
+for pod in "${PODS[@]}"; do
+  phase=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  [[ "$phase" == "Running" ]] || continue
+
+  kubectl exec -n "$NAMESPACE" "$pod" -- vault status >/dev/null 2>&1
+  rc=$?
+
+  if [[ $rc -eq 2 ]]; then
+    kubectl exec -n "$NAMESPACE" "$pod" -- vault operator unseal "$UNSEAL_KEY" >/dev/null 2>&1
+    logger -t vault-autounseal "Unsealed $pod"
+    if [[ "$pod" == "vault-0" ]]; then
+      sleep 5
+    fi
+  fi
+done
+EOF
+
+sudo chmod 700 /usr/local/bin/vault-autounseal.sh
+sudo /usr/local/bin/vault-autounseal.sh
+```
+
+*Verification:* Confirm exit code is `0` (`echo $?`). You can also test failover by deleting a follower (`kubectl delete pod vault-2 -n vault`), waiting ~1 minute, and running `journalctl -t vault-autounseal -n 5`.
+
+---
+
+### 15.8 Post-Migration Cleanup
+Once AWX lookups (`:30820`) and a pod-deletion failover test succeed, remove the old scaled-down `Deployment`:
+
+```bash
+kubectl delete deploy/vault -n vault
+```
+
+*(Keep `pvc/vault-data` and `~/vault-file-backup/` for a few days as a rollback safety net before deleting them.)*
+
+---
+
+> [← Back to Project Overview](./README.md)
