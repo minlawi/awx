@@ -2746,8 +2746,8 @@ vault secrets list
 
 ---
 
-### 15.7 Upgrade the Host Auto-Unseal Cron Script for Raft
-Replace `/usr/local/bin/vault-autounseal.sh` so the existing root cronjob (`* * * * * /usr/local/bin/vault-autounseal.sh`) loops through all three Raft pods using `flock` to avoid overlapping runs:
+### 15.7 Upgrade the Host Auto-Unseal Cron Script for Raft (Dynamic Pod Discovery)
+Replace `/usr/local/bin/vault-autounseal.sh` so the existing root cronjob (`* * * * * /usr/local/bin/vault-autounseal.sh`) dynamically discovers all running pods labeled `app=vault` in natural order (`vault-0`, `vault-1`, ...), using `flock` to avoid overlapping runs. Because pod names are discovered dynamically, no script edits are required when scaling the `StatefulSet` up or down:
 
 ```bash
 sudo cp /usr/local/bin/vault-autounseal.sh /usr/local/bin/vault-autounseal.sh.bak
@@ -2760,10 +2760,11 @@ export PATH="/usr/local/bin:/usr/bin:/bin"
 export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
 
 NAMESPACE="vault"
+LABEL_SELECTOR="app=vault"
 KEY_FILE="/root/.vault-unseal-key"
 LOCK_FILE="/var/run/vault-autounseal.lock"
-PODS=("vault-0" "vault-1" "vault-2")
 
+# Prevent overlapping cron runs
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
 
@@ -2771,16 +2772,28 @@ flock -n 9 || exit 0
 UNSEAL_KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
 [[ -n "$UNSEAL_KEY" ]] || exit 1
 
-for pod in "${PODS[@]}"; do
-  phase=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-  [[ "$phase" == "Running" ]] || continue
+# Dynamically discover all Running Vault pods, sorted in natural order (vault-0, vault-1, ...)
+mapfile -t PODS < <(
+  kubectl get pods -n "$NAMESPACE" -l "$LABEL_SELECTOR" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+  | sort -V
+)
 
+[[ ${#PODS[@]} -gt 0 ]] || exit 0
+
+for pod in "${PODS[@]}"; do
+  [[ -n "$pod" ]] || continue
+
+  # vault status exit codes: 0 = unsealed, 2 = sealed, 1 = error
   kubectl exec -n "$NAMESPACE" "$pod" -- vault status >/dev/null 2>&1
   rc=$?
 
   if [[ $rc -eq 2 ]]; then
     kubectl exec -n "$NAMESPACE" "$pod" -- vault operator unseal "$UNSEAL_KEY" >/dev/null 2>&1
     logger -t vault-autounseal "Unsealed $pod"
+
+    # Give vault-0 a moment to establish Raft leadership before unsealing followers
     if [[ "$pod" == "vault-0" ]]; then
       sleep 5
     fi
@@ -2792,7 +2805,7 @@ sudo chmod 700 /usr/local/bin/vault-autounseal.sh
 sudo /usr/local/bin/vault-autounseal.sh
 ```
 
-*Verification:* Confirm exit code is `0` (`echo $?`). You can also test failover by deleting a follower (`kubectl delete pod vault-2 -n vault`), waiting ~1 minute, and running `journalctl -t vault-autounseal -n 5`.
+*Verification:* Confirm exit code is `0` (`echo $?`). You can also test failover by sealing or deleting a follower (`kubectl delete pod vault-2 -n vault`), waiting ~1 minute, and running `journalctl -t vault-autounseal -n 5` to confirm it automatically discovers and unseals the pod.
 
 ---
 
