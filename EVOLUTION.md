@@ -1,6 +1,6 @@
 # Architecture Evolution: Problems Solved, Improvements & Limitations
 
-This document traces how each milestone improved or expanded on the previous stage, highlighting **what was solved**, the **key improvements**, and the **current limitations** from **Task 2 through Task 16**.
+This document traces how each milestone improved or expanded on the previous stage, highlighting **what was solved**, the **key improvements**, and the **current limitations** from **Task 2 through Task 17**.
 
 > **Note:** **Task 1** (installing AWX on K3s) establishes the baseline control plane, so comparisons begin at **Task 2**.
 
@@ -13,7 +13,7 @@ This document traces how each milestone improved or expanded on the previous sta
 | **Task&nbsp;4&nbsp;(Enhances&nbsp;Task&nbsp;3)** | TARANAC (TACACS+) Direct SSH AAA | Per-device local password management | Centralized AuthN/AuthZ/Accounting with local fallback |
 | **Task&nbsp;5&nbsp;(Enhances&nbsp;Task&nbsp;4)** | AWX Jobs via TACACS+ Credentials | Split human vs. automation AAA paths | Full command-level auditing of Ansible changes in TARANAC |
 | **Task&nbsp;6&nbsp;(Enhances&nbsp;Task&nbsp;5)** | GitHub Webhooks + `ngrok` Tunnel | Manual AWX Job Template launches | Automated AWX job triggers directly on `git push` |
-| **Task&nbsp;7&nbsp;(Enhances&nbsp;Task&nbsp;6)** | Self-Hosted Runner + Selective Actions | Rotating `ngrok` URLs & noisy full-repo triggers | Eliminated inbound exposure; LAN-only API calls via GitHub Secrets |
+| **Task&nbsp;7&nbsp;(Enhances&nbsp;Task&nbsp;6)** | Self-Hosted Runner + Selective Actions | Rotating `ngrok` URLs & noisy full-repo triggers | Eliminated inbound exposure; LAN-only API calls via least-privilege local `github-actions-bot` token in GitHub Secrets |
 | **Task&nbsp;8&nbsp;(Enhances&nbsp;Task&nbsp;7)** | Modular Git-Backed Source of Truth | Manual AWX inventory edits & hardcoded playbooks | Git-versioned configs, PR review gates, and `git revert` rollback |
 | **Task&nbsp;9&nbsp;(Expands&nbsp;Task&nbsp;8)** | Juniper Junos (NETCONF) + Multi-Vendor EE | Single-vendor device coverage (Cisco IOS only) | Multi-vendor support (Cisco SSH + Juniper NETCONF) on a hardened local EE (`Pull: Never`) |
 | **Task&nbsp;10&nbsp;(Enhances&nbsp;Tasks&nbsp;8&nbsp;&amp;&nbsp;9)** | Master `site.yml` + Dynamic Tag CI/CD | Manually adding new AWX templates & editing CI for every new feature | Only changed features run (lower risk of breaking other configs) from one master AWX template |
@@ -22,7 +22,8 @@ This document traces how each milestone improved or expanded on the previous sta
 | **Task&nbsp;13&nbsp;(Enhances&nbsp;Task&nbsp;12)** | Open Policy Agent (Conftest) CI/CD Gate | Accidental duplicate IPs or wrong `/32` masks pushed straight to routers | Pre-flight Policy-as-Code gate blocks non-compliant Git SOT changes before AWX is ever called |
 | **Task&nbsp;14&nbsp;(Enhances&nbsp;Tasks&nbsp;2&nbsp;&amp;&nbsp;12)** | Vault GitHub App Plugin + Ephemeral HTTPS Sync | Static SSH Deploy Keys stored permanently in AWX & GitHub | Zero-standing GitHub credentials; 1-hour read-only `ghs_...` tokens minted on demand via isolated `awx-github-vault-approle` |
 | **Task&nbsp;15&nbsp;(Enhances&nbsp;Tasks&nbsp;12&nbsp;&amp;&nbsp;14)** | 3-Node Vault Raft Cluster (`StatefulSet`) | Single-pod Vault `file` storage SPOF & no HA failover | Zero-data-loss migration (`file` → `raft`), 3-node quorum with automatic leader election & cluster-aware auto-unseal |
-| **Task&nbsp;16&nbsp;(Enhances&nbsp;Task&nbsp;15)** | Vault Monitoring (Prometheus + Grafana `25314`) | Manual CLI checks to see if Vault pods are sealed or healthy | Live dashboard tracking unsealed nodes, active leader, leases, and API success rates with disk-safe Prometheus storage |
+| **Task&nbsp;16&nbsp;(Enhances&nbsp;Task&nbsp;15)** | Vault Monitoring (Prometheus + Grafana `25314`) | Manual CLI checks to see if Vault pods are sealed or healthy | Live dashboard tracking unsealed nodes, active leader, leases, and API success rates with persistent Grafana & disk-safe Prometheus storage |
+| **Task&nbsp;17&nbsp;(Enhances&nbsp;Tasks&nbsp;11,&nbsp;15&nbsp;&amp;&nbsp;16)** | Centralized LDAP Admin UI Sign-In (Vault, AWX, TARANAC & Grafana) | Separate local admin passwords & daily Vault root token usage across 4 UIs | Unified LLDAP sign-in using per-service `lldap_strict_readonly` bind accounts & dedicated admin groups, isolated from router automation & CI/CD bot |
 
 ---
 
@@ -57,7 +58,7 @@ This document traces how each milestone improved or expanded on the previous sta
 
 ### Task 7 (Enhances Task 6): Self-Hosted Runner & Selective GitHub Actions
 * **What We Solved:** Replaced fragile tunnels with a persistent `systemd` runner on the AWX VM and used `git diff` to trigger only modified playbooks.
-* **Key Improvement:** Completely removes inbound internet exposure—the runner polls GitHub over **outbound HTTPS** and calls AWX strictly over the **private LAN**, with API tokens protected in GitHub Secrets.
+* **Key Improvement:** Completely removes inbound internet exposure—the runner polls GitHub over **outbound HTTPS** and calls AWX strictly over the **private LAN**, authenticating with a dedicated least-privilege local **`github-actions-bot`** (`Execute`-only on target templates, decoupled from LDAP) stored in GitHub Secrets.
 * **Current Limitations:** Device inventory is still maintained manually in the AWX UI, and configuration values remain hardcoded in playbooks.
 
 ### Task 8 (Enhances Task 7): Modular Git-Backed Source of Truth (SOT)
@@ -103,7 +104,7 @@ This document traces how each milestone improved or expanded on the previous sta
 * **Current Limitations (Future Production Hardening):**
   * **Policy Tampering Protection:** Keeping `policies/` inside the same repository allows an engineer with direct push access to edit the policy alongside inventory changes; production pipelines protect `policies/` with GitHub `CODEOWNERS` / branch protection or pull policies from a separate read-only security repository.
   * **UI Bypass Coverage:** Manual Job Template launches directly inside the AWX Web UI skip the GitHub Actions gate; runtime policy validation (e.g., querying an OPA service inside K3s during `site.yml`) can close this gap.
-  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 17**.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 18**.
 
 ### Task 14 (Enhances Tasks 2 & 12): Ephemeral GitHub App Tokens via HashiCorp Vault
 * **What We Solved:** Eliminated static GitHub SSH Deploy Keys (`ed25519`) from both AWX and GitHub so engineers no longer manage or manually rotate standing repository keys. Every AWX Project Sync and Inventory Sync dynamically pulls the latest commits over HTTPS (`https://github.com/minlawi/awx.git`) using a freshly minted token.
@@ -112,7 +113,7 @@ This document traces how each milestone improved or expanded on the previous sta
   * **Blast-Radius Isolation:** Source Control authentication (`awx-github-vault-approle` → `awx-read-github`) is strictly isolated from Network AAA authentication (`awx-ldap-vault-approle` → `awx-read-ldap`), ensuring a compromised lookup credential in one domain cannot access secrets in the other.
 * **Current Limitations (Future Production Hardening):**
   * **Master Signing Key Rotation:** While `ghs_...` tokens expire after 1 hour, the GitHub App `.pem` private key stored in Vault (`github/config`) remains static and should be rotated periodically (e.g., every 90 days) in production.
-  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 17**.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 18**.
 
 ### Task 15 (Enhances Tasks 12 & 14): 3-Node HashiCorp Vault Raft Cluster (`StatefulSet`)
 * **What We Solved:** Eliminated the single-pod Vault `file` storage limitation (`HA Enabled: false`) by migrating Vault to a **3-node High-Availability Raft `StatefulSet`** (`vault-0`, `vault-1`, `vault-2`) via `vault operator migrate` with zero data loss—preserving all existing `ldap/` and `github/` secrets engines, AppRoles, policies, the GitHub plugin (`v2.3.2`), and the `:30820` NodePort Service.
@@ -130,17 +131,27 @@ This document traces how each milestone improved or expanded on the previous sta
 * **Current Limitations (Future Production Hardening):**
   * **Single Underlying Host:** Because all Raft pods run on the same single-node K3s VM, pod-level failover works cleanly, but a host VM failure still takes down all replicas; production clusters spread Raft peers across separate nodes/availability zones.
   * **Auto-Unseal & Transport:** Still relies on the host-level Shamir cron script and plaintext HTTP (`:30820`) on the lab LAN; production clusters should use Cloud KMS/Transit Auto-Unseal and end-to-end TLS.
-  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 17**.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 18**.
 
 ### Task 16 (Enhances Task 15): Vault Monitoring with Prometheus & Grafana
 * **What We Solved:** Removed the need to run manual CLI checks (`vault status`, `vault operator raft list-peers`) to know if Vault pods are sealed, down, or failing API requests.
 * **Key Improvement:**
-  * **Full-Cluster Visibility:** Deployed `kube-prometheus-stack` on K3s and used a `ServiceMonitor` (`vault-raft-metrics`) against `svc/vault-internal` so Prometheus scrapes every Raft pod individually—whether it is the active leader, a standby follower, or sealed.
-  * **Ready-to-Use Dashboard:** Imported Grafana Dashboard ID **`25314`** (`Vault / Overview`) to track unsealed nodes, total nodes, scrape health, active leases, and API response rates (`2xx` / `4xx` / `5xx`) in real time, and verified live seal/unseal detection by restarting a follower pod.
+  * **Full-Cluster Visibility:** Deployed `kube-prometheus-stack` on K3s and used a `ServiceMonitor` (`vault-raft-metrics`) against `svc/vault-internal` so Prometheus scrapes every Raft pod individually—whether it is the active leader, a standby follower, or sealed—with `prometheus_retention_time = "24h"` preserving sealed-node metrics.
+  * **Ready-to-Use Dashboard & Persistent Storage:** Imported Grafana Dashboard ID **`25314`** (`Vault / Overview`) to track unsealed nodes, total nodes, scrape health, active leases, and API response rates (`2xx` / `4xx` / `5xx`) in real time, backed by a `1Gi` `local-path` PVC so dashboards persist across pod restarts and Helm upgrades.
   * **Disk-Safe Storage:** Configured Prometheus with `5d` retention, a `2GB` size cap, and a `3Gi` PVC so monitoring data never fills up the K3s host disk.
 * **Current Limitations (Future Production Hardening):**
   * **Service Coverage:** Monitoring currently covers HashiCorp Vault and K3s; AWX (`/api/v2/metrics/`), TARANAC, and LLDAP probes (`blackbox_exporter`) will be added next.
   * **Alerting & Auth:** Alertmanager notification routing (Slack/Telegram/Email) is not configured yet, and Vault metrics use `unauthenticated_metrics_access = true` over plain HTTP on the lab network instead of a scoped Prometheus token over HTTPS.
+
+### Task 17 (Enhances Tasks 11, 15 & 16): Centralized LDAP Sign-In for Admin UIs (Vault, AWX, TARANAC & Grafana)
+* **What We Solved:** Eliminated daily reliance on separate local `admin` passwords and the Vault root token by connecting all four management interfaces (**Vault**, **AWX**, **TARANAC**, and **Grafana**) to **LLDAP** for unified human administrator sign-in.
+* **Key Improvement:**
+  * **Least-Privilege Bind Isolation:** Each platform uses a dedicated read-only bind account in `lldap_strict_readonly` (`vault_auth_bind`, `awx_auth_bind`, `grafana_auth_bind`, and existing `taranac_bind`)—strictly separated from `vault_bind` (`lldap_password_manager`) so login configs never hold password-reset rights.
+  * **Role-Based Admin Group Isolation:** Dedicated LLDAP admin groups (`vault_admin_groups`, `awx_admins`, `taranac_admins`, `grafana_admins`) grant administrative roles (including AWX `NetworkAutomation` org membership + `is_superuser`, TARANAC `Admin group`, and Grafana Server Admin) while keeping router automation accounts (`netadmins`) locked out of management UIs.
+  * **Resilient CI/CD Decoupling:** Automated GitHub Actions API calls remain bound to the local least-privilege `github-actions-bot` (`Execute`-only) rather than an LDAP user, preventing directory outages or personal account changes from breaking deployments.
+* **Current Limitations (Future Production Hardening):**
+  * **Transport Security:** Admin UI LDAP binds run over plain `ldap://` (`30389` / `3890`) on the lab LAN/cluster network; production setups should enforce `ldaps://` or StartTLS.
+  * **Outage Resilience:** Break-glass fallback workflows for Vault, TARANAC, and LLDAP outages remain to be built in **Task 18**.
 
 ---
 

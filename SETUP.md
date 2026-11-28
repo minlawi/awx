@@ -613,20 +613,31 @@ To eliminate `ngrok` and stop every `git push` from triggering all AWX Job Templ
 
 ---
 
-### 7.2 Create an AWX API Token and Add GitHub Repository Secrets
-1. **Generate an AWX Personal Access Token (PAT):**
+### 7.2 Create a Local Bot User, AWX API Token, and GitHub Repository Secrets
+Instead of generating an API token under the Superuser `admin` account or a personal LDAP account, create a dedicated **local AWX bot user** with least-privilege **Execute** rights. Keeping this bot user local ensures GitHub Actions keeps working even if LLDAP is unavailable or a personal admin account is changed.
+
+1. **Create a Dedicated Local Bot User in AWX:**
    * Open the **AWX Web UI** (`http://<your-server-ip>:32000`).
-   * Go to **Access** → **Users** → click your admin user → open the **Tokens** tab → click **Add**.
+   * Go to **Access** → **Users** → **Add**:
+     * **Username:** `github-actions-bot`
+     * **Password:** `<strong-local-password>`
+     * **User Type:** `Normal User` *(not System Administrator)*
+     * **Organization:** `NetworkAutomation`
+   * Click **Save**.
+2. **Grant Execute-Only Permission on Your Job Template(s):**
+   * Open each Job Template that GitHub Actions will trigger (e.g., `set_hostname.yml`), go to its **Access** tab → **Add** → select **Users** → **`github-actions-bot`** → choose role **`Execute`** → **Save**.
+3. **Generate an AWX Personal Access Token (PAT) for `github-actions-bot`:**
+   * Log in to AWX as `github-actions-bot` (or open **Access** → **Users** → `github-actions-bot` → **Tokens** → **Add**).
    * Set **Scope** to `Write`, click **Save**, and copy the generated token immediately.
-2. **Find Your Job Template IDs:**
+4. **Find Your Job Template IDs:**
    * Open each Job Template in AWX and note its ID from the browser URL (e.g., `/#/templates/job_template/12/details` → `12` for `set_hostname.yml`).
-3. **Store Credentials in GitHub Secrets:**
+5. **Store Credentials in GitHub Secrets:**
    * In your GitHub repository, go to **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
    * Add the following secrets:
      * `AWX_BASE_URL`: `http://<your-server-ip>:32000` *(no trailing slash)*
-     * `AWX_API_TOKEN`: `<your-awx-personal-access-token>`
+     * `AWX_API_TOKEN`: `<github-actions-bot-api-token>`
 
-*Verification:* Confirm both `AWX_BASE_URL` and `AWX_API_TOKEN` appear under **Repository secrets**.
+*Verification:* Confirm `github-actions-bot` has only `Execute` access on the target template(s), has an active `Write` token under **Tokens**, and both `AWX_BASE_URL` and `AWX_API_TOKEN` appear under **Repository secrets**.
 
 ---
 
@@ -653,7 +664,7 @@ jobs:
       matrix:
         include:
           - playbook: playbooks/set_hostname.yml
-            template_id: 12 # Get this ID from Step 7.2.2
+            template_id: 12 # Get this ID from Step 7.2.4
           # Future playbooks: just add 2 lines (playbook + template_id)
 
     steps:
@@ -699,7 +710,7 @@ git push origin main
 
 *Verification:*
 1. **GitHub → Actions:** `playbooks/set_hostname.yml` logs `Change detected in playbooks/set_hostname.yml – launching AWX template 12...`.
-2. **AWX Web UI → Views → Jobs:** Only Template `12` (`set_hostname.yml`) launches and completes with status **Successful** over the private LAN, updating `R1`'s hostname to `R1-ACTIONS-LAN` with `ngrok` completely turned off.
+2. **AWX Web UI → Views → Jobs:** Only Template `12` (`set_hostname.yml`) launches under `github-actions-bot` and completes with status **Successful** over the private LAN, updating `R1`'s hostname to `R1-ACTIONS-LAN` with `ngrok` completely turned off.
 
 ---
 
@@ -1197,8 +1208,9 @@ git push origin main
    * **Credentials:** Select your TACACS+ Machine Credential
    * **Job Tags:** Leave the input field blank and check **Prompt on launch** *(required so GitHub Actions can pass `job_tags` in the API payload)*
 4. Click **Save** and note the numeric **Template ID** from the browser URL (e.g., `/#/templates/job_template/17/details` → `17`).
+5. **Grant CI/CD Execute Permission:** Open the **Access** tab on `Master-Network-Deploy` → **Add** → select **Users** → **`github-actions-bot`** *(created in Step 7.2)* → assign role **`Execute`** → **Save**.
 
-*Verification:* Confirm `Master-Network-Deploy` is saved with `site.yml` selected and **Prompt on launch** enabled on **Job Tags**.
+*Verification:* Confirm `Master-Network-Deploy` is saved with `site.yml` selected, **Prompt on launch** enabled on **Job Tags**, and `github-actions-bot` listed under **Access** with the `Execute` role.
 
 ---
 
@@ -3188,7 +3200,7 @@ Log in to the **AWX Web UI** (`http://<AWX_VM_IP>:32000`) as local `admin`, go t
 * **LDAP Organization Map:**
   ```json
   {
-    "Default": {
+    "NetworkAutomation": {
       "admins": "cn=awx_admins,ou=groups,dc=lab,dc=local",
       "users": true
     }
@@ -3197,7 +3209,9 @@ Log in to the **AWX Web UI** (`http://<AWX_VM_IP>:32000`) as local `admin`, go t
 
 Click **Save**.
 
-*Verification:* Open an incognito window to `http://<AWX_VM_IP>:32000`, sign in as `lawi` with your LLDAP password, and confirm **Settings** and **Access** appear in the left sidebar (System Administrator).
+> **Note on CI/CD Tokens:** Keep `AWX_API_TOKEN` (GitHub Actions) bound to the local `github-actions-bot` service account created in **Step 7.2** rather than an LDAP user—this prevents LLDAP outages or personal account changes from breaking automated deployments.
+
+*Verification:* Open an incognito window to `http://<AWX_VM_IP>:32000`, sign in as `lawi` with your LLDAP password, and confirm **Settings** and **Access** appear in the left sidebar (System Administrator) and `lawi` is placed in the `NetworkAutomation` organization.
 
 ---
 
