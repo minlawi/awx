@@ -1012,21 +1012,21 @@ set interfaces em0 unit 0 family inet address 192.168.50.200/24
 
 set system authentication-order tacplus
 set system authentication-order password
-set system root-authentication encrypted-password "P@ssw0rd123"
+set system root-authentication plain-text-password
 
-set system tacplus-server 192.168.50.201 secret "$9$ahJjkq.fznCmfcleK8LGDiHqfTz3/Ap5T"
+set system tacplus-server 192.168.50.201 secret "tacacs-server-secret"
 set system tacplus-server 192.168.50.201 source-address 192.168.50.200
 
 set system accounting events login
 set system accounting events change-log
 set system accounting events interactive-commands
 
-set system accounting destination tacplus server 192.168.50.201 secret "$9$cZhSKW8L7Vs4X7.5TQn6revM87-Vw2oJN-"
+set system accounting destination tacplus server 192.168.50.201 secret "tacacs-server-secret"
 set system accounting destination tacplus server 192.168.50.201 source-address 192.168.50.200
 
 set system login user admin uid 2000
 set system login user admin class super-user
-set system login user admin authentication encrypted-password "P@ssw0rd123"
+set system login user admin authentication plain-text-password
 
 set system login user remote full-name "TACACS+ Remote User"
 set system login user remote uid 2001
