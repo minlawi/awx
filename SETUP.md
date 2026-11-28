@@ -2833,3 +2833,227 @@ kubectl delete deploy/vault -n vault
 ---
 
 > [← Back to Project Overview](./README.md)
+
+## 16. Monitor HashiCorp Vault with Prometheus and Grafana
+
+In this step, we deploy **Prometheus** and **Grafana** (`kube-prometheus-stack`) on K3s, enable Vault's built-in Prometheus metrics endpoint, and connect them using a Kubernetes `ServiceMonitor`. We then import Grafana Dashboard ID **`25314`** (`Vault / Overview`) to watch seal status, active nodes, leases, and API response rates in real time.
+
+---
+
+### 16.1 Pre-Check Resources, Ports, and Vault Cluster
+Check free disk space, K3s node status, NodePorts, and Vault pods before installing the monitoring stack:
+
+```bash
+df -h / /var/lib/rancher/k3s/storage
+kubectl get nodes
+kubectl get svc -A | grep NodePort
+kubectl get pods,svc -n vault --show-labels
+vault operator raft list-peers
+```
+
+*Verification:*
+* Confirm NodePort `30300` (for Grafana) is not in use.
+* Confirm `svc/vault-internal` has label `app=vault` and port `http` (`8200`).
+* Confirm all Vault pods are `1/1 Running` and healthy in Raft.
+
+---
+
+### 16.2 Install Helm and Set `KUBECONFIG`
+Install Helm v3 and make sure `KUBECONFIG` points to K3s so Helm can talk to your cluster:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+grep -q 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' ~/.bashrc || echo 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml' >> ~/.bashrc
+```
+
+*Verification:* Run `helm version` and confirm it prints the installed Helm version.
+
+---
+
+### 16.3 Deploy `kube-prometheus-stack` with Disk-Safe Settings
+Create a `values.yaml` file that exposes Grafana on NodePort `30300`, lets Prometheus discover `ServiceMonitor` objects in any namespace, and limits Prometheus disk usage (`5d` retention, `2GB` max size, `3Gi` PVC) so it never fills up your VM disk:
+
+```bash
+mkdir -p ~/monitoring-k3s && cd ~/monitoring-k3s
+
+cat << 'EOF' > values.yaml
+grafana:
+  service:
+    type: NodePort
+    nodePort: 30300
+
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    scrapeInterval: 30s
+    retention: 5d
+    retentionSize: "2GB"
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 3Gi
+EOF
+
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  -f values.yaml
+```
+
+Get the default Grafana `admin` password:
+
+```bash
+kubectl get secret -n monitoring kube-prometheus-stack-grafana \
+  -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+```
+
+*Verification:* Run `kubectl get pods,pvc,svc -n monitoring` and confirm all pods are `Running`, the Prometheus PVC is `Bound`, and Grafana is exposed on NodePort `30300`.
+
+---
+
+### 16.4 Enable Prometheus Metrics in `cm/vault-config`
+Update `cm/vault-config` to turn on Prometheus telemetry, set `prometheus_retention_time = "24h"` so sealed-node gauges (`vault_core_unsealed = 0`) stay visible in Prometheus, and allow standby/sealed pods to report metrics directly (`unauthenticated_metrics_access = true`). Keep all active Raft peers in `retry_join` (3 or 5 nodes depending on your current cluster size):
+
+```bash
+cat << 'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault.hcl: |
+    ui = true
+    disable_mlock = true
+    plugin_directory = "/vault/plugins"
+
+    storage "raft" {
+      path = "/vault/data"
+      retry_join {
+        leader_api_addr = "http://vault-0.vault-internal:8200"
+      }
+      retry_join {
+        leader_api_addr = "http://vault-1.vault-internal:8200"
+      }
+      retry_join {
+        leader_api_addr = "http://vault-2.vault-internal:8200"
+      }
+      retry_join {
+        leader_api_addr = "http://vault-3.vault-internal:8200"
+      }
+      retry_join {
+        leader_api_addr = "http://vault-4.vault-internal:8200"
+      }
+    }
+
+    listener "tcp" {
+      address         = "0.0.0.0:8200"
+      cluster_address = "0.0.0.0:8201"
+      tls_disable     = 1
+      telemetry {
+        unauthenticated_metrics_access = true
+      }
+    }
+
+    telemetry {
+      prometheus_retention_time = "24h"
+      disable_hostname          = true
+    }
+EOF
+```
+
+Restart Vault so all pods load the updated config, then unseal them with the auto-unseal script:
+
+```bash
+kubectl rollout restart statefulset/vault -n vault
+kubectl rollout status statefulset/vault -n vault
+sudo /usr/local/bin/vault-autounseal.sh
+```
+
+*Verification:* Test the Prometheus metrics endpoint directly from your host:
+
+```bash
+curl -s "${VAULT_ADDR}/v1/sys/metrics?format=prometheus" | grep -E "^vault_core_(unsealed|active)"
+```
+
+Confirm `vault_core_unsealed` returns `1` (`vault_core_active` returns `1` if the request hits the leader, or `0` if it hits a standby follower).
+
+---
+
+### 16.5 Create the Vault `ServiceMonitor`
+Apply a `ServiceMonitor` targeting `svc/vault-internal` (`app: vault`, port `http`) so Prometheus scrapes every Vault pod individually every 30 seconds:
+
+```bash
+cat << 'EOF' | kubectl apply -f -
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vault-raft-metrics
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - vault
+  selector:
+    matchLabels:
+      app: vault
+  endpoints:
+    - port: http
+      path: /v1/sys/metrics
+      params:
+        format:
+          - prometheus
+      interval: 30s
+EOF
+```
+
+*Verification:* Run `kubectl get servicemonitor -n monitoring` and confirm `vault-raft-metrics` is listed.
+
+---
+
+### 16.6 Import Grafana Dashboard ID `25314`
+1. Open Grafana in your browser at `http://<AWX_VM_IP>:30300` and log in with `admin` and the password from Step 16.3.
+2. *(Quick Query Check)* Go to **Explore** → select **Prometheus** → switch to **Code** mode and run `vault_core_unsealed` to confirm all Vault pods return `1`.
+3. Open the left menu (`☰`) → **Dashboards** → **New** → **Import**.
+4. Enter Grafana Dashboard ID **`25314`** (`Vault / Overview`) and click **Load**.
+5. Select **Prometheus** as the data source and click **Import**.
+
+*Verification:* The **Summary** row shows your live **Unsealed Nodes**, **Total Nodes**, and **Scrape Up** counts matching your cluster size, along with **Active Leases** and **Response Rate by Type** (`100%` `2xx`).
+
+*(Optional: To add a per-pod seal status panel on Dashboard `25314`, click **Make editable** in the top-right, add a **Stat** panel with query `vault_core_unsealed` and Legend `{{pod}}`, map `0` → `SEALED` (Red) and `1` → `UNSEALED` (Green), and save the dashboard.)*
+
+---
+
+### 16.7 Test Live Seal and Unseal Detection
+Verify that Grafana catches a sealed pod in real time without breaking Raft quorum:
+
+1. **Pause auto-unseal briefly:**
+   ```bash
+   sudo chmod 600 /usr/local/bin/vault-autounseal.sh
+   ```
+2. **Restart one follower pod (e.g., `vault-4`):**
+   ```bash
+   kubectl delete pod vault-4 -n vault
+   kubectl get pods -n vault -w
+   ```
+   Wait ~30–60 seconds for Prometheus to scrape the restarted (sealed) pod. Confirm **Unsealed Nodes** drops by 1 in Grafana (`25314`).
+3. **Re-enable auto-unseal and recover:**
+   ```bash
+   sudo chmod 700 /usr/local/bin/vault-autounseal.sh
+   sudo /usr/local/bin/vault-autounseal.sh
+   ```
+
+*Verification:* Within 30–60 seconds, **Unsealed Nodes** returns to full cluster count in Grafana, and `vault operator raft list-peers` confirms all peers are healthy voters.
+
+---
+
+> [← Back to Project Overview](./README.md)
