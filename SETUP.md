@@ -2872,8 +2872,8 @@ grep -q 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' ~/.bashrc || echo 'export KUBECON
 
 ---
 
-### 16.3 Deploy `kube-prometheus-stack` with Disk-Safe Settings
-Create a `values.yaml` file that exposes Grafana on NodePort `30300`, lets Prometheus discover `ServiceMonitor` objects in any namespace, and limits Prometheus disk usage (`5d` retention, `2GB` max size, `3Gi` PVC) so it never fills up your VM disk:
+### 16.3 Deploy `kube-prometheus-stack` with Disk-Safe Settings & Grafana Persistence
+Create a `values.yaml` file that exposes Grafana on NodePort `30300`, enables a `1Gi` persistent volume for Grafana (so imported dashboards survive Helm upgrades), lets Prometheus discover `ServiceMonitor` objects in any namespace, and limits Prometheus disk usage (`5d` retention, `2GB` max size, `3Gi` PVC):
 
 ```bash
 mkdir -p ~/monitoring-k3s && cd ~/monitoring-k3s
@@ -2883,6 +2883,11 @@ grafana:
   service:
     type: NodePort
     nodePort: 30300
+
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 1Gi
 
 prometheus:
   prometheusSpec:
@@ -2916,7 +2921,7 @@ kubectl get secret -n monitoring kube-prometheus-stack-grafana \
   -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
 ```
 
-*Verification:* Run `kubectl get pods,pvc,svc -n monitoring` and confirm all pods are `Running`, the Prometheus PVC is `Bound`, and Grafana is exposed on NodePort `30300`.
+*Verification:* Run `kubectl get pods,pvc,svc -n monitoring` and confirm all pods are `Running`, both the `1Gi` Grafana PVC and `3Gi` Prometheus PVC are `Bound`, and Grafana is exposed on NodePort `30300`.
 
 ---
 
@@ -3053,6 +3058,235 @@ Verify that Grafana catches a sealed pod in real time without breaking Raft quor
    ```
 
 *Verification:* Within 30–60 seconds, **Unsealed Nodes** returns to full cluster count in Grafana, and `vault operator raft list-peers` confirms all peers are healthy voters.
+
+---
+
+> [← Back to Project Overview](./README.md)
+
+## 17. Centralized LDAP Sign-In for Admin UIs (Vault, AWX, TARANAC & Grafana)
+
+Instead of signing in with separate local `admin` passwords or the Vault root token, we connect all four management interfaces (**Vault**, **AWX**, **TARANAC**, and **Grafana**) to the existing **LLDAP** server (`30389` / `31717`). Each platform gets its own read-only bind account (`lldap_strict_readonly`) and dedicated admin group so human UI access stays isolated from router automation accounts (`netadmins`).
+
+### Who Uses What?
+
+| Platform | Read-Only Bind Account (`lldap_strict_readonly`) | LLDAP Admin Group | Granted Role |
+| :--- | :--- | :--- | :--- |
+| **Vault** (`:30820`) | `vault_auth_bind` *(separate from `vault_bind`)* | `vault_admin_groups` | `vault-admin` policy (full admin without root token) |
+| **AWX** (`:32000`) | `awx_auth_bind` | `awx_admins` | System Administrator (`is_superuser`) |
+| **TARANAC** | `taranac_bind` *(already created in Step 11.2)* | `taranac_admins` | Admin UI full access (`Admin group` ON) |
+| **Grafana** (`:30300`) | `grafana_auth_bind` | `grafana_admins` | Org Admin + Grafana Server Admin |
+
+---
+
+### 17.1 Create Admin Groups & Read-Only Bind Accounts in LLDAP
+Open the LLDAP Web UI (`http://<AWX_VM_IP>:31717`) and log in as `admin`:
+
+1. **Create four admin groups** (**Groups** → **Create a group**):
+   * `vault_admin_groups`
+   * `awx_admins`
+   * `taranac_admins`
+   * `grafana_admins`
+2. **Create three new read-only bind users** (**Users** → **Create a user**) and add each one to the built-in **`lldap_strict_readonly`** group *(TARANAC already uses `taranac_bind` from Step 11.2)*:
+   * `vault_auth_bind`
+   * `awx_auth_bind`
+   * `grafana_auth_bind`
+3. **Add your personal admin account** (e.g., `lawi`) to all four admin groups (`vault_admin_groups`, `awx_admins`, `taranac_admins`, and `grafana_admins`).
+
+*Verification:* Test from your Ubuntu host that `vault_auth_bind` can see `lawi` in `vault_admin_groups`:
+```bash
+ldapsearch -x -H ldap://<AWX_VM_IP>:30389 \
+  -D "uid=vault_auth_bind,ou=people,dc=lab,dc=local" \
+  -W \
+  -b "ou=groups,dc=lab,dc=local" \
+  "(&(member=uid=lawi,ou=people,dc=lab,dc=local)(objectClass=groupOfUniqueNames))" cn
+```
+Confirm the output returns `cn: vault_admin_groups` and `result: 0 Success`.
+
+---
+
+### 17.2 Configure Vault LDAP Sign-In (`auth/ldap/`)
+Log in to the Vault CLI with your initial root token, create the `vault-admin` policy, enable `auth/ldap/`, and map `vault_admin_groups` to `vault-admin`:
+
+```bash
+vault login <INITIAL_ROOT_TOKEN>
+
+vault policy write vault-admin - << 'EOF'
+path "*" {
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+EOF
+
+vault auth enable ldap
+
+vault write auth/ldap/config \
+  url="ldap://<AWX_VM_IP>:30389" \
+  binddn="uid=vault_auth_bind,ou=people,dc=lab,dc=local" \
+  bindpass="<vault-auth-bind-password>" \
+  userdn="ou=people,dc=lab,dc=local" \
+  userattr="uid" \
+  userfilter="(&(uid={{.Username}})(objectClass=person))" \
+  groupdn="ou=groups,dc=lab,dc=local" \
+  groupfilter="(&(member={{.UserDN}})(objectclass=groupOfUniqueNames))" \
+  groupattr="cn" \
+  discoverdn=false
+
+vault write auth/ldap/groups/vault_admin_groups policies=vault-admin
+```
+
+*Verification:* Run `vault login -method=ldap username=lawi` and confirm `token_policies` shows `["default" "vault-admin"]`. In the Vault Web UI (`http://<AWX_VM_IP>:30820`), switch **Method** to **LDAP** and sign in as `lawi`.
+
+---
+
+### 17.3 Configure AWX LDAP Sign-In
+Log in to the **AWX Web UI** (`http://<AWX_VM_IP>:32000`) as local `admin`, go to **Settings** → **Authentication** → **LDAP settings** (**Default**) → **Edit**, and enter:
+
+* **LDAP Server URI:** `ldap://<AWX_VM_IP>:30389`
+* **LDAP Bind DN:** `uid=awx_auth_bind,ou=people,dc=lab,dc=local`
+* **LDAP Bind Password:** `<awx-auth-bind-password>`
+* **LDAP Start TLS:** `Off`
+* **LDAP Group Type:** `MemberDNGroupType`
+* **LDAP Require Group:** `cn=awx_admins,ou=groups,dc=lab,dc=local`
+* **LDAP User Search:**
+  ```json
+  [
+    "ou=people,dc=lab,dc=local",
+    "SCOPE_SUBTREE",
+    "(uid=%(user)s)"
+  ]
+  ```
+* **LDAP Group Search:**
+  ```json
+  [
+    "ou=groups,dc=lab,dc=local",
+    "SCOPE_SUBTREE",
+    "(objectClass=groupOfUniqueNames)"
+  ]
+  ```
+* **LDAP Group Type Parameters:**
+  ```json
+  {
+    "member_attr": "member",
+    "name_attr": "cn"
+  }
+  ```
+* **LDAP User Attribute Map:**
+  ```json
+  {
+    "first_name": "givenName",
+    "last_name": "sn",
+    "email": "mail"
+  }
+  ```
+* **LDAP User Flags By Group:**
+  ```json
+  {
+    "is_superuser": [
+      "cn=awx_admins,ou=groups,dc=lab,dc=local"
+    ]
+  }
+  ```
+* **LDAP Organization Map:**
+  ```json
+  {
+    "Default": {
+      "admins": "cn=awx_admins,ou=groups,dc=lab,dc=local",
+      "users": true
+    }
+  }
+  ```
+
+Click **Save**.
+
+*Verification:* Open an incognito window to `http://<AWX_VM_IP>:32000`, sign in as `lawi` with your LLDAP password, and confirm **Settings** and **Access** appear in the left sidebar (System Administrator).
+
+---
+
+### 17.4 Enable TARANAC Admin UI Sign-In (Reusing Step 11.4 LDAP Config)
+TARANAC already has the `LLDAP Lab` connection (`taranac_bind`) from Step 11.4, so only the new admin group needs to be synced:
+
+1. Log in to the **TARANAC Web UI** as your local admin, go to **Settings** → **LDAP** → **`LLDAP Lab`** → **Edit**, and add `cn=taranac_admins,ou=groups,dc=lab,dc=local` under **Selective Group Sync**. Save and click **Sync Now**.
+2. Go to **INFRASTRUCTURE** → **Identity** → **Groups**, open **`taranac_admins`**, toggle **Admin group** **ON**, and save. *(Leave **Admin group** OFF on `netadmins` so automation accounts cannot access the Admin UI.)*
+
+*Verification:* Open an incognito window to the TARANAC Web UI, sign in as `lawi@lab.local` (or `lawi` if no local `lawi` account exists) with your LLDAP password, and confirm full administrator access instead of Operator permissions.
+
+---
+
+### 17.5 Configure Grafana LDAP Sign-In (Helm Upgrade)
+Update `~/monitoring-k3s/values.yaml` to add `grafana.ini` and `ldap` settings alongside the persistent storage and Prometheus settings from Step 16.3, then upgrade the Helm release:
+
+```bash
+cd ~/monitoring-k3s
+
+cat << 'EOF' > values.yaml
+grafana:
+  service:
+    type: NodePort
+    nodePort: 30300
+
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 1Gi
+
+  grafana.ini:
+    auth.ldap:
+      enabled: true
+      config_file: /etc/grafana/ldap.toml
+      allow_sign_up: true
+
+  ldap:
+    enabled: true
+    config: |
+      [[servers]]
+      host = "lldap.lldap.svc.cluster.local"
+      port = 3890
+      use_ssl = false
+      start_tls = false
+      ssl_skip_verify = false
+
+      bind_dn = "uid=grafana_auth_bind,ou=people,dc=lab,dc=local"
+      bind_password = """<grafana-auth-bind-password>"""
+
+      search_filter = "(uid=%s)"
+      search_base_dns = ["ou=people,dc=lab,dc=local"]
+
+      [servers.attributes]
+      name = "givenName"
+      surname = "sn"
+      username = "uid"
+      member_of = "memberOf"
+      email = "mail"
+
+      [[servers.group_mappings]]
+      group_dn = "cn=grafana_admins,ou=groups,dc=lab,dc=local"
+      org_role = "Admin"
+      grafana_admin = true
+
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    scrapeInterval: 30s
+    retention: 5d
+    retentionSize: "2GB"
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 3Gi
+EOF
+
+helm upgrade kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  -f values.yaml
+
+kubectl rollout status deployment/kube-prometheus-stack-grafana -n monitoring
+```
+
+*Verification:* Open an incognito window to `http://<AWX_VM_IP>:30300`, sign in as `lawi` with your LLDAP password, and confirm **Administration → Users and access → Users** lists `lawi` as **Grafana Admin** (`Yes`) with **LDAP** authentication and Dashboard `25314` preserved.
 
 ---
 
