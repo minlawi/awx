@@ -1906,6 +1906,18 @@ vault write -f auth/approle/role/awx-ldap-vault-approle/secret-id
 
 *Verification:* On `LDAP_Credential`, the **Password** field displays the linked `Vault-LDAP-Lookup` badge rather than a static encrypted value.
 
+##### Optional: How to Pull `Username` from Vault Dynamically
+If you prefer zero hardcoded fields (or if you ever switch to Vault **Dynamic Roles** where usernames change on every lease), you can link **Username** to the exact same Vault lookup:
+
+1. Delete `awx` (or `ldap_ansible`) from the **Username** field *(this re-enables the greyed-out **Key** icon next to it)*.
+2. Click the **Key** icon next to **Username**.
+3. Select your existing **`Vault-LDAP-Lookup`** credential.
+4. Fill in the same path, but set **Key Name** to `username`:
+   * **Name of Secret Backend:** `ldap`
+   * **Path to Secret:** `static-cred/vault-ldap-secret-role`
+   * **Key Name:** `username`
+5. Click **Test** to confirm it resolves `awx`, then click **OK** and **Save**.
+
 ---
 
 ### 12.8 Enable Real-Time Audit Logging & Verify Live Rotation End-to-End
